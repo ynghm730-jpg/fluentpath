@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="50%" stop-color="#1d4ed8"/>
+      <stop offset="100%" stop-color="#1e3a8a"/>
+    </linearGradient>
+    <linearGradient id="needleNorth" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ef4444"/>
+      <stop offset="100%" stop-color="#dc2626"/>
+    </linearGradient>
+    <linearGradient id="needleSouth" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#cbd5e1"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Background Rounded Squircle (Maskable Safe Area) -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)"/>
+
+  <!-- Inner Subtle Ring -->
+  <circle cx="256" cy="256" r="180" fill="none" stroke="#ffffff" stroke-opacity="0.15" stroke-width="6"/>
+  <circle cx="256" cy="256" r="140" fill="none" stroke="#ffffff" stroke-opacity="0.25" stroke-width="4" stroke-dasharray="12 12"/>
+
+  <!-- Cardinal Points -->
+  <text x="256" y="100" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="28" font-weight="900" fill="#ffffff" text-anchor="middle" opacity="0.9">N</text>
+  <text x="256" y="426" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="28" font-weight="900" fill="#ffffff" text-anchor="middle" opacity="0.6">S</text>
+  <text x="420" y="266" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="28" font-weight="900" fill="#ffffff" text-anchor="middle" opacity="0.6">E</text>
+  <text x="92" y="266" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="28" font-weight="900" fill="#ffffff" text-anchor="middle" opacity="0.6">W</text>
+
+  <!-- Compass Needle with Shadow -->
+  <g filter="url(#shadow)" transform="rotate(35 256 256)">
+    <!-- North Pointer (Red) -->
+    <polygon points="256,120 286,256 256,242 226,256" fill="url(#needleNorth)"/>
+    <!-- South Pointer (Silver/White) -->
+    <polygon points="256,392 286,256 256,270 226,256" fill="url(#needleSouth)"/>
+    <!-- Center Pivot Pin -->
+    <circle cx="256" cy="256" r="22" fill="#ffffff"/>
+    <circle cx="256" cy="256" r="14" fill="#1e40af"/>
+    <circle cx="256" cy="256" r="6" fill="#ffffff"/>
+  </g>
+</svg>

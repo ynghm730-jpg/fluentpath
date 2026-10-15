@@ -1,0 +1,32 @@
+{
+  "name": "FluentPath - 英語スピーキング自習アプリ",
+  "short_name": "FluentPath",
+  "description": "英語会議で即答するための15分自習アプリ。瞬間英作文・リピート・フレーズ帳",
+  "start_url": "/fluentpath/",
+  "scope": "/fluentpath/",
+  "id": "/fluentpath/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#2563eb",
+  "icons": [
+    {
+      "src": "/fluentpath/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/fluentpath/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/fluentpath/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ],
+  "categories": ["education", "productivity"]
+}

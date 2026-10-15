@@ -1,0 +1,427 @@
+import { useState, useEffect, type FC, type FormEvent } from 'react';
+import {
+  Trash2,
+  Download,
+  Key,
+  ShieldCheck,
+  CheckCircle,
+  Volume2,
+} from 'lucide-react';
+import type { StudyRecord } from '../types';
+import { db, getWeakRecords, getSetting, setSetting } from '../services/db';
+import { speakText } from '../services/speech';
+import { downloadCSV } from '../utils/csv';
+
+interface StatsDataViewProps {
+  onShowToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
+  onRefreshData: () => void;
+}
+
+export const StatsDataView: FC<StatsDataViewProps> = ({
+  onShowToast,
+  onRefreshData,
+}) => {
+  const [records, setRecords] = useState<StudyRecord[]>([]);
+  const [weakRecords, setWeakRecords] = useState<StudyRecord[]>([]);
+  const [geminiApiKey, setGeminiApiKey] = useState<string>('');
+  const [isKeySaved, setIsKeySaved] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<'stats' | 'weak' | 'settings'>('stats');
+
+  // データロード
+  const loadData = async () => {
+    try {
+      const allRecords = await db.records.reverse().toArray();
+      setRecords(allRecords);
+
+      const weaks = await getWeakRecords();
+      setWeakRecords(weaks);
+
+      const savedKey = await getSetting('gemini_api_key', '');
+      setGeminiApiKey(savedKey);
+      setIsKeySaved(!!savedKey);
+    } catch (err) {
+      console.error('Failed to load stats:', err);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  // 統計値の計算
+  const totalSessions = records.length;
+  const quickRecords = records.filter((r) => r.type === 'quick');
+  const repeatRecords = records.filter((r) => r.type === 'repeat');
+
+  const avgQuickTime =
+    quickRecords.length > 0
+      ? (
+          quickRecords.reduce((acc, r) => acc + (r.responseTimeMs || 0), 0) /
+          quickRecords.length /
+          1000
+        ).toFixed(1)
+      : '0.0';
+
+  const perfectCount = records.filter((r) => r.selfRating === 'perfect').length;
+  const goodCount = records.filter((r) => r.selfRating === 'good').length;
+  const hardCount = records.filter((r) => r.selfRating === 'hard').length;
+
+  const perfectRate =
+    totalSessions > 0 ? Math.round((perfectCount / totalSessions) * 100) : 0;
+
+  // Gemini APIキーの保存
+  const handleSaveApiKey = async (e: FormEvent) => {
+    e.preventDefault();
+    try {
+      await setSetting('gemini_api_key', geminiApiKey.trim());
+      setIsKeySaved(!!geminiApiKey.trim());
+      onShowToast(
+        geminiApiKey.trim()
+          ? 'Gemini APIキーを端末内に安全に保存しました'
+          : 'APIキーを削除しました（AI不要モード）',
+        'success'
+      );
+    } catch (err) {
+      console.error('Failed to save API key:', err);
+      onShowToast('保存に失敗しました', 'error');
+    }
+  };
+
+  // 全履歴のバックアップダウンロード（CSV）
+  const handleExportHistory = () => {
+    if (records.length === 0) {
+      onShowToast('出力可能な学習履歴がありません', 'error');
+      return;
+    }
+
+    const headers = [
+      'id',
+      'type',
+      'date',
+      'promptText',
+      'userResponse',
+      'modelAnswer',
+      'selfRating',
+      'responseTimeMs',
+      'similarityScore',
+      'timestamp',
+    ];
+
+    const rows = records.map((r) => [
+      r.id || '',
+      r.type,
+      r.date,
+      `"${(r.promptText || '').replace(/"/g, '""')}"`,
+      `"${(r.userResponse || '').replace(/"/g, '""')}"`,
+      `"${(r.modelAnswer || '').replace(/"/g, '""')}"`,
+      r.selfRating,
+      r.responseTimeMs,
+      r.similarityScore || 0,
+      r.timestamp,
+    ]);
+
+    const csvContent = [headers.join(','), ...rows.map((row) => row.join(','))].join('\r\n');
+    const today = new Date().toISOString().split('T')[0];
+    downloadCSV(`FluentPath_History_${today}.csv`, csvContent);
+    onShowToast('学習履歴CSVをダウンロードしました', 'success');
+  };
+
+  // 履歴のリセット
+  const handleClearHistory = async () => {
+    if (
+      confirm(
+        'これまでの学習履歴ログをすべて削除しますか？\n（※フレーズ帳のデータは削除されません）'
+      )
+    ) {
+      try {
+        await db.records.clear();
+        await loadData();
+        onRefreshData();
+        onShowToast('学習履歴を初期化しました', 'info');
+      } catch (err) {
+        console.error('Failed to clear history:', err);
+      }
+    }
+  };
+
+  return (
+    <div className="space-y-4 pb-12 animate-in fade-in duration-300">
+      {/* 上部タブ切り替え */}
+      <div className="flex bg-slate-200/80 p-1 rounded-2xl text-xs font-semibold">
+        <button
+          onClick={() => setActiveTab('stats')}
+          className={`flex-1 py-2 rounded-xl transition-all ${
+            activeTab === 'stats'
+              ? 'bg-white text-blue-600 shadow-sm font-bold'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          学習統計
+        </button>
+        <button
+          onClick={() => setActiveTab('weak')}
+          className={`flex-1 py-2 rounded-xl transition-all flex items-center justify-center gap-1 ${
+            activeTab === 'weak'
+              ? 'bg-white text-rose-600 shadow-sm font-bold'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          <span>苦手問題</span>
+          {weakRecords.length > 0 && (
+            <span className="bg-rose-100 text-rose-600 text-[10px] px-1.5 py-0.2 rounded-full">
+              {weakRecords.length}
+            </span>
+          )}
+        </button>
+        <button
+          onClick={() => setActiveTab('settings')}
+          className={`flex-1 py-2 rounded-xl transition-all ${
+            activeTab === 'settings'
+              ? 'bg-white text-slate-900 shadow-sm font-bold'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          データ・設定
+        </button>
+      </div>
+
+      {/* 1. 学習統計タブ */}
+      {activeTab === 'stats' && (
+        <div className="space-y-4 animate-in fade-in duration-200">
+          {/* サマリーカード */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+              <span className="text-[11px] font-semibold text-slate-500 block">総練習回数</span>
+              <p className="text-2xl font-extrabold text-blue-600 mt-1">
+                {totalSessions} <span className="text-xs font-normal text-slate-500">回</span>
+              </p>
+              <span className="text-[10px] text-slate-400 mt-0.5 block">
+                作文: {quickRecords.length} / リピート: {repeatRecords.length}
+              </span>
+            </div>
+
+            <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+              <span className="text-[11px] font-semibold text-slate-500 block">平均回答速度</span>
+              <p className="text-2xl font-extrabold text-indigo-600 mt-1">
+                {avgQuickTime} <span className="text-xs font-normal text-slate-500">秒</span>
+              </p>
+              <span className="text-[10px] text-slate-400 mt-0.5 block">
+                目標: 5秒以内の即答
+              </span>
+            </div>
+          </div>
+
+          {/* 自己評価の分布 */}
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-bold text-slate-800">自己評価の割合</h3>
+              <span className="text-xs text-emerald-600 font-bold">即答率: {perfectRate}%</span>
+            </div>
+
+            <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden flex">
+              <div
+                className="bg-emerald-500 h-full transition-all"
+                style={{ width: `${totalSessions ? (perfectCount / totalSessions) * 100 : 0}%` }}
+                title={`言えた: ${perfectCount}`}
+              />
+              <div
+                className="bg-blue-400 h-full transition-all"
+                style={{ width: `${totalSessions ? (goodCount / totalSessions) * 100 : 0}%` }}
+                title={`惜しい: ${goodCount}`}
+              />
+              <div
+                className="bg-rose-400 h-full transition-all"
+                style={{ width: `${totalSessions ? (hardCount / totalSessions) * 100 : 0}%` }}
+                title={`要復習: ${hardCount}`}
+              />
+            </div>
+
+            <div className="grid grid-cols-3 text-center text-xs pt-1">
+              <div>
+                <span className="block text-[11px] text-emerald-700 font-bold">🎉 言えた</span>
+                <span className="font-extrabold text-slate-800">{perfectCount}回</span>
+              </div>
+              <div>
+                <span className="block text-[11px] text-blue-700 font-bold">👍 惜しい</span>
+                <span className="font-extrabold text-slate-800">{goodCount}回</span>
+              </div>
+              <div>
+                <span className="block text-[11px] text-rose-700 font-bold">💪 要復習</span>
+                <span className="font-extrabold text-slate-800">{hardCount}回</span>
+              </div>
+            </div>
+          </div>
+
+          {/* 最近の履歴ログ */}
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+            <h3 className="text-xs font-bold text-slate-800">最近の学習履歴（直近10件）</h3>
+            {records.length === 0 ? (
+              <p className="text-xs text-slate-400 text-center py-4">まだ履歴がありません</p>
+            ) : (
+              <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                {records.slice(0, 10).map((r, i) => (
+                  <div
+                    key={r.id || i}
+                    className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-between text-xs"
+                  >
+                    <div className="space-y-0.5 max-w-[70%]">
+                      <span className="text-[10px] font-bold text-blue-600 block">
+                        {r.type === 'quick' ? '瞬間英作文' : 'リピート'} · {r.date}
+                      </span>
+                      <p className="text-slate-800 font-medium truncate">{r.promptText}</p>
+                    </div>
+
+                    <div className="text-right">
+                      <span
+                        className={`text-[11px] font-bold px-2 py-0.5 rounded-md inline-block ${
+                          r.selfRating === 'perfect'
+                            ? 'bg-emerald-100 text-emerald-700'
+                            : r.selfRating === 'good'
+                            ? 'bg-blue-100 text-blue-700'
+                            : 'bg-rose-100 text-rose-700'
+                        }`}
+                      >
+                        {r.selfRating === 'perfect' ? '言えた' : r.selfRating === 'good' ? '惜しい' : '要復習'}
+                      </span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">
+                        {(r.responseTimeMs / 1000).toFixed(1)}s
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 2. 苦手問題タブ */}
+      {activeTab === 'weak' && (
+        <div className="space-y-3 animate-in fade-in duration-200">
+          <div className="flex items-center justify-between px-1">
+            <h3 className="text-xs font-bold text-slate-800">要復習マークされた問題</h3>
+            <span className="text-xs text-slate-500">{weakRecords.length}件</span>
+          </div>
+
+          {weakRecords.length === 0 ? (
+            <div className="py-12 bg-white rounded-3xl border border-dashed border-slate-300 text-center px-4">
+              <CheckCircle className="w-10 h-10 mx-auto text-emerald-500 mb-2" />
+              <p className="text-sm font-bold text-slate-800">現在、苦手問題はありません！</p>
+              <p className="text-xs text-slate-500 mt-1">
+                練習で「要復習」を選択した問題がここに集まり、重点復習できます。
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {weakRecords.map((r, idx) => (
+                <div
+                  key={idx}
+                  className="bg-white border border-rose-200 rounded-2xl p-4 shadow-sm space-y-2"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-[10px] font-bold text-rose-600 bg-rose-50 px-2 py-0.5 rounded-md">
+                      {r.type === 'quick' ? '瞬間英作文' : 'リピート'}
+                    </span>
+                    <button
+                      onClick={() => speakText(r.modelAnswer)}
+                      className="p-1.5 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-lg transition-colors"
+                      title="音声を再生"
+                    >
+                      <Volume2 className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <div>
+                    <p className="text-xs font-bold text-slate-800">{r.promptText}</p>
+                    <p className="text-xs text-blue-700 font-semibold mt-1 bg-blue-50/60 p-2 rounded-lg">
+                      模範: {r.modelAnswer}
+                    </p>
+                  </div>
+
+                  {r.userResponse && (
+                    <p className="text-[11px] text-slate-500">
+                      前回のあなたの回答: <span className="text-slate-700">{r.userResponse}</span>
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 3. データ＆設定タブ */}
+      {activeTab === 'settings' && (
+        <div className="space-y-4 animate-in fade-in duration-200">
+          {/* データ保存とプライバシー説明 */}
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-2 text-xs">
+            <div className="flex items-center gap-2 text-blue-600 font-bold">
+              <ShieldCheck className="w-5 h-5" />
+              <span>完全ローカル・プライバシー保証</span>
+            </div>
+            <p className="text-slate-600 leading-relaxed">
+              FluentPathは、すべての学習データ・フレーズ・音声をブラウザのIndexedDBにのみ保存します。
+              外部サーバーへの送信や有料課金は一切発生しません（開発費・運用費0円）。
+            </p>
+          </div>
+
+          {/* 将来のAI拡張：Gemini API設定 */}
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3 text-xs">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 font-bold text-slate-800">
+                <Key className="w-4 h-4 text-amber-500" />
+                <span>Gemini API設定（拡張・任意）</span>
+              </div>
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${isKeySaved ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                {isKeySaved ? 'APIキー登録中' : 'AI不要モード稼働中'}
+              </span>
+            </div>
+
+            <p className="text-slate-500 leading-relaxed text-[11px]">
+              初期状態ではAI APIキーなしで全機能が快適に動作します。
+              将来、高度なAI文法添削を有効にしたい場合、Google AI Studioの無料APIキーを入力できます。
+              （※キーはブラウザ内のみに保存され、コードや外部には公開されません）
+            </p>
+
+            <form onSubmit={handleSaveApiKey} className="space-y-2">
+              <input
+                type="password"
+                value={geminiApiKey}
+                onChange={(e) => setGeminiApiKey(e.target.value)}
+                placeholder="AIzaSy... （無料のGemini APIキー）"
+                className="w-full p-2.5 rounded-xl border border-slate-200 focus:border-blue-500 outline-none text-xs"
+              />
+              <button
+                type="submit"
+                className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl transition-colors"
+              >
+                {geminiApiKey ? 'API設定を保存' : 'AI不要モードで使用'}
+              </button>
+            </form>
+          </div>
+
+          {/* バックアップとデータ管理 */}
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-2.5 text-xs">
+            <h3 className="font-bold text-slate-800">データバックアップ & メンテナンス</h3>
+
+            <button
+              onClick={handleExportHistory}
+              className="w-full py-2.5 px-3 border border-slate-200 hover:bg-slate-50 rounded-xl font-semibold text-slate-700 flex items-center justify-center gap-2 transition-colors"
+            >
+              <Download className="w-4 h-4 text-blue-600" />
+              <span>学習履歴をCSVでバックアップ</span>
+            </button>
+
+            <button
+              onClick={handleClearHistory}
+              className="w-full py-2.5 px-3 border border-rose-200 hover:bg-rose-50 rounded-xl font-semibold text-rose-600 flex items-center justify-center gap-2 transition-colors"
+            >
+              <Trash2 className="w-4 h-4" />
+              <span>学習履歴ログをクリア</span>
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
