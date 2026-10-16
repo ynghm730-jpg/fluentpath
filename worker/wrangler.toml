@@ -1,0 +1,22 @@
+name = "fluentpath-ai"
+main = "src/index.ts"
+compatibility_date = "2026-10-16"
+workers_dev = true
+
+# Do not place secrets in this file.
+[vars]
+DEFAULT_MODEL = "gemini-3.1-flash-lite"
+
+# Rate Limiting API; protects against bursts on a per-location basis.
+# This is NOT a precise global counter or a daily spending cap.
+[[ratelimits]]
+name = "AI_RATE_LIMITER"
+namespace_id = "735109"
+
+[ratelimits.simple]
+limit = 5
+period = 60
+
+# Register these as Cloudflare Secrets, never in GitHub:
+# GEMINI_API_KEY
+# AUTH_TOKEN (>= 32 random characters)

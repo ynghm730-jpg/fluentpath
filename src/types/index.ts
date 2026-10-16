@@ -57,3 +57,19 @@ export interface DailyGoalProgress {
   phraseCount: number;
   totalTimeSeconds: number;
 }
+
+export interface AiReviewResult {
+  original: string;
+  revised: string;
+  revisedJapanese: string;
+  grammarExplanation: string;
+  naturalPhrasing: string;
+  positiveFeedback: string;
+}
+
+export interface AiReviewRequest {
+  userEnglish: string;
+  japanesePrompt?: string;
+  modelAnswer?: string;
+  model?: string;
+}

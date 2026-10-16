@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type FC } from 'react';
+import { useState, useEffect, useRef, type FC, type FormEvent } from 'react';
 import {
   Mic,
   MicOff,
@@ -8,11 +8,17 @@ import {
   ArrowRight,
   Clock,
   Sparkles,
+  Bot,
+  Loader2,
+  CheckCircle2,
+  Key,
+  X,
 } from 'lucide-react';
-import type { QuickPrompt, SelfRating, StudyRecord } from '../types';
+import type { QuickPrompt, SelfRating, StudyRecord, AiReviewResult } from '../types';
 import { INITIAL_PROMPTS } from '../data/initialPrompts';
 import { speakText, stopSpeaking, SpeechRecognizer, evaluateSimilarity } from '../services/speech';
 import { db } from '../services/db';
+import { requestAiReview, getAiToken, setAiToken } from '../services/ai';
 
 interface QuickPromptViewProps {
   onShowToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
@@ -41,6 +47,15 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
 
   // 自己評価
   const [selectedRating, setSelectedRating] = useState<SelfRating | null>(null);
+
+  // AI添削状態
+  const [aiReview, setAiReview] = useState<AiReviewResult | null>(null);
+  const [isAiLoading, setIsAiLoading] = useState<boolean>(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [isTokenModalOpen, setIsTokenModalOpen] = useState<boolean>(false);
+  const [tokenInput, setTokenInput] = useState<string>('');
+  const [rememberToken, setRememberToken] = useState<boolean>(false);
+  const [isAiSavedToPhrasebook, setIsAiSavedToPhrasebook] = useState<boolean>(false);
 
   // 回答時間計測
   const startTimeRef = useRef<number>(Date.now());
@@ -72,6 +87,9 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
     setTextInput('');
     setSelectedRating(null);
     setIsSavedToPhrasebook(false);
+    setAiReview(null);
+    setAiError(null);
+    setIsAiSavedToPhrasebook(false);
     startTimeRef.current = Date.now();
 
     if (timerDuration > 0) {
@@ -225,6 +243,83 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
       }
     } catch (err) {
       console.error('Failed to toggle phrasebook:', err);
+      onShowToast('保存中にエラーが発生しました', 'error');
+    }
+  };
+
+  // AI添削リクエスト実行
+  const handleRequestAiReview = async () => {
+    if (!currentPrompt) return;
+    const answerText = textInput.trim() || userSpeech.trim();
+    if (!answerText) {
+      onShowToast('添削する英文がありません。声に出すか、入力してください。', 'info');
+      return;
+    }
+
+    const token = getAiToken();
+    if (!token) {
+      setTokenInput('');
+      setIsTokenModalOpen(true);
+      return;
+    }
+
+    setIsAiLoading(true);
+    setAiError(null);
+
+    try {
+      const result = await requestAiReview({
+        userEnglish: answerText,
+        japanesePrompt: currentPrompt.japanese,
+        modelAnswer: currentPrompt.english,
+      });
+      setAiReview(result);
+      onShowToast('AI添削が完了しました！', 'success');
+    } catch (err: any) {
+      console.error('AI Review Error:', err);
+      const errMsg = err.message || 'AI添削中にエラーが発生しました。';
+      setAiError(errMsg);
+      if (errMsg.includes('401') || errMsg.includes('NO_TOKEN')) {
+        setIsTokenModalOpen(true);
+      }
+      onShowToast(errMsg, 'error');
+    } finally {
+      setIsAiLoading(false);
+    }
+  };
+
+  // トークン保存と添削の再実行
+  const handleSaveTokenAndReview = (e: FormEvent) => {
+    e.preventDefault();
+    if (!tokenInput.trim()) {
+      onShowToast('アクセストークンを入力してください', 'error');
+      return;
+    }
+    setAiToken(tokenInput.trim(), rememberToken);
+    setIsTokenModalOpen(false);
+    onShowToast('トークンを設定しました。AI添削を開始します...', 'info');
+    setTimeout(() => {
+      handleRequestAiReview();
+    }, 100);
+  };
+
+  // AI修正版をフレーズ帳に追加
+  const handleSaveAiRevisedToPhrasebook = async () => {
+    if (!aiReview || !currentPrompt) return;
+    try {
+      await db.phrases.put({
+        id: `phrase-ai-${Date.now()}`,
+        english: aiReview.revised,
+        japanese: aiReview.revisedJapanese || currentPrompt.japanese,
+        notes: `【AI解説】${aiReview.grammarExplanation}\n【表現】${aiReview.naturalPhrasing}`,
+        tags: ['AI添削', ...currentPrompt.tags],
+        isBookmarked: true,
+        reviewCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+      setIsAiSavedToPhrasebook(true);
+      onShowToast('AI修正版をフレーズ帳に保存しました！', 'success');
+    } catch (err) {
+      console.error('Failed to save AI revised phrase:', err);
       onShowToast('保存中にエラーが発生しました', 'error');
     }
   };
@@ -471,6 +566,147 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
             </div>
           )}
 
+          {/* AI添削トリガーボタン */}
+          <div className="pt-1">
+            <button
+              onClick={handleRequestAiReview}
+              disabled={isAiLoading}
+              className="w-full py-2.5 px-4 bg-gradient-to-r from-indigo-600 via-blue-600 to-indigo-700 hover:from-indigo-700 hover:to-blue-700 text-white rounded-2xl font-bold text-xs shadow-md shadow-indigo-500/20 flex items-center justify-center gap-2 transition-all active:scale-[0.99] disabled:opacity-60"
+            >
+              {isAiLoading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin text-amber-300" />
+                  <span>Gemini AIがあなたの回答を添削中...</span>
+                </>
+              ) : (
+                <>
+                  <Bot className="w-4 h-4 text-amber-300" />
+                  <span>{aiReview ? 'AI添削をもう一度実行する' : 'あなたの回答をAI添削する（Gemini）'}</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* AI添削エラー表示 */}
+          {aiError && (
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl text-xs text-rose-800 space-y-1 animate-in fade-in">
+              <div className="font-bold flex items-center gap-1.5 text-rose-900">
+                <span>⚠️ AI添削エラー</span>
+              </div>
+              <p className="text-[11px] leading-relaxed">{aiError}</p>
+              <div className="pt-1">
+                <button
+                  onClick={() => setIsTokenModalOpen(true)}
+                  className="text-[11px] font-bold text-blue-600 hover:underline"
+                >
+                  アクセストークンを再設定する →
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* AI添削結果カード */}
+          {aiReview && (
+            <div className="bg-gradient-to-br from-indigo-50/90 via-blue-50/50 to-white border-2 border-indigo-200 rounded-3xl p-4 shadow-md space-y-3 animate-in fade-in zoom-in-95 duration-200">
+              <div className="flex items-center justify-between border-b border-indigo-100 pb-2">
+                <div className="flex items-center gap-1.5 text-xs font-extrabold text-indigo-900">
+                  <Bot className="w-4 h-4 text-indigo-600" />
+                  <span>AI英文添削レポート</span>
+                  <span className="text-[10px] bg-indigo-100 text-indigo-700 font-bold px-1.5 py-0.2 rounded-full">
+                    Gemini
+                  </span>
+                </div>
+
+                {/* 修正版をフレーズ帳に追加ボタン */}
+                <button
+                  onClick={handleSaveAiRevisedToPhrasebook}
+                  className={`px-2.5 py-1 rounded-xl text-xs font-bold flex items-center gap-1 transition-all ${
+                    isAiSavedToPhrasebook
+                      ? 'bg-amber-100 text-amber-800'
+                      : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm'
+                  }`}
+                  title="修正版をフレーズ帳に保存"
+                >
+                  {isAiSavedToPhrasebook ? (
+                    <>
+                      <CheckCircle2 className="w-3.5 h-3.5 text-amber-600" />
+                      <span>保存済み</span>
+                    </>
+                  ) : (
+                    <>
+                      <BookmarkPlus className="w-3.5 h-3.5" />
+                      <span>修正版を保存</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* 1. 元の英文 */}
+              <div className="text-xs space-y-0.5">
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                  あなたの元の英文:
+                </span>
+                <p className="text-slate-700 font-medium bg-white/80 p-2 rounded-xl border border-slate-200/60 font-mono text-xs">
+                  {aiReview.original}
+                </p>
+              </div>
+
+              {/* 2. 修正版（Revised）＆ 日本語訳 */}
+              <div className="bg-white p-3 rounded-2xl border-2 border-indigo-300 shadow-sm space-y-1.5">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <span className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider block">
+                      ✨ おすすめ修正英文（アメリカ英語）:
+                    </span>
+                    <p className="text-sm font-extrabold text-slate-900 mt-0.5 leading-snug">
+                      {aiReview.revised}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => speakText(aiReview.revised)}
+                    className="p-1.5 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-xl transition-colors flex-shrink-0"
+                    title="修正英文を読み上げ (en-US)"
+                  >
+                    <Volume2 className="w-4 h-4" />
+                  </button>
+                </div>
+                <p className="text-xs text-slate-600 font-medium pt-1 border-t border-slate-100">
+                  {aiReview.revisedJapanese}
+                </p>
+              </div>
+
+              {/* 3. 良かった点 */}
+              {aiReview.positiveFeedback && (
+                <div className="p-2.5 bg-emerald-50/80 border border-emerald-200/80 rounded-xl text-xs text-emerald-950 space-y-0.5">
+                  <span className="font-bold text-emerald-800 text-[11px] block">
+                    🎉 伝わっている点・良かった点:
+                  </span>
+                  <p className="text-[11px] leading-relaxed">{aiReview.positiveFeedback}</p>
+                </div>
+              )}
+
+              {/* 4. 文法・語法の解説 */}
+              {aiReview.grammarExplanation && (
+                <div className="p-2.5 bg-blue-50/80 border border-blue-200/80 rounded-xl text-xs text-blue-950 space-y-0.5">
+                  <span className="font-bold text-blue-800 text-[11px] block">
+                    💡 文法・語法のポイント:
+                  </span>
+                  <p className="text-[11px] leading-relaxed whitespace-pre-wrap">{aiReview.grammarExplanation}</p>
+                </div>
+              )}
+
+              {/* 5. より自然な英語表現 */}
+              {aiReview.naturalPhrasing && (
+                <div className="p-2.5 bg-amber-50/80 border border-amber-200/80 rounded-xl text-xs text-amber-950 space-y-0.5">
+                  <span className="font-bold text-amber-800 text-[11px] block">
+                    💬 会議・日常で即戦力の別表現:
+                  </span>
+                  <p className="text-[11px] leading-relaxed">{aiReview.naturalPhrasing}</p>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* 参考類似度（断定はせず参考目安として表示） */}
           {similarity && currentAnswer && (
             <div className="flex items-center justify-between text-xs px-1 text-slate-500">
@@ -542,6 +778,76 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
               <span>次の問題</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* AI添削アクセストークン設定モーダル */}
+      {isTokenModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl w-full max-w-sm p-5 shadow-2xl space-y-4 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+              <div className="flex items-center gap-2 text-indigo-900 font-bold text-sm">
+                <Key className="w-4 h-4 text-amber-500" />
+                <span>AI添削アクセストークン</span>
+              </div>
+              <button
+                onClick={() => setIsTokenModalOpen(false)}
+                className="p-1 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              APIキーはCloudflare Worker（サーバー側）に安全に秘匿されています。
+              Workerに設定した<strong>個人専用アクセストークン（AUTH_TOKEN）</strong>を入力してください。
+            </p>
+
+            <form onSubmit={handleSaveTokenAndReview} className="space-y-3">
+              <div>
+                <label className="text-[11px] font-bold text-slate-700 block mb-1">
+                  アクセストークン
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={tokenInput}
+                  onChange={(e) => setTokenInput(e.target.value)}
+                  placeholder="fp_sec_..."
+                  className="w-full text-xs p-2.5 rounded-xl border border-slate-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none font-mono"
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="rememberToken"
+                  checked={rememberToken}
+                  onChange={(e) => setRememberToken(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300"
+                />
+                <label htmlFor="rememberToken" className="text-[11px] text-slate-600 select-none cursor-pointer">
+                  次回以降も保存する（共有端末では選ばない）
+                </label>
+              </div>
+
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setIsTokenModalOpen(false)}
+                  className="flex-1 py-2.5 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50"
+                >
+                  キャンセル
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md shadow-indigo-500/20"
+                >
+                  保存して添削する
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
