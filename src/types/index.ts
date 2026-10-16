@@ -73,3 +73,27 @@ export interface AiReviewRequest {
   modelAnswer?: string;
   model?: string;
 }
+
+
+// AI英会話：回答を含む会話履歴は端末にのみ保存
+export type ConversationMode = 'ai' | 'script';
+export type ConversationLevel = 'B1' | 'B2';
+export type ConversationTopic = 'cafe' | 'airport' | 'hotel' | 'meeting' | 'intro' | 'travel';
+export interface ConversationTurn { role: 'assistant' | 'user'; text: string; }
+export interface ConversationCorrection { original: string; revised: string; japanese: string; explanation: string; }
+export interface ConversationFeedback {
+  positive: string[];
+  corrections: ConversationCorrection[];
+  summary: string;
+  nextStep: string;
+}
+export interface ConversationSession {
+  id: string;
+  date: string;
+  startedAt: string;
+  mode: ConversationMode;
+  level: ConversationLevel;
+  topic: ConversationTopic;
+  turns: ConversationTurn[];
+  feedback?: ConversationFeedback;
+}

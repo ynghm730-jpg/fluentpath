@@ -1,5 +1,5 @@
 import Dexie, { type Table } from 'dexie';
-import type { PhraseItem, StudyRecord } from '../types';
+import type { PhraseItem, StudyRecord, ConversationSession } from '../types';
 
 export interface AppSetting {
   key: string;
@@ -10,6 +10,7 @@ export class FluentPathDB extends Dexie {
   phrases!: Table<PhraseItem, string>;
   records!: Table<StudyRecord, number>;
   settings!: Table<AppSetting, string>;
+  conversations!: Table<ConversationSession, string>;
 
   constructor() {
     super('FluentPathDatabase');
@@ -18,6 +19,13 @@ export class FluentPathDB extends Dexie {
       phrases: 'id, english, *tags, isBookmarked, createdAt, lastReviewedAt',
       records: '++id, type, promptId, selfRating, date, timestamp',
       settings: 'key',
+    });
+    // Existing version-1 data remains intact.
+    this.version(2).stores({
+      phrases: 'id, english, *tags, isBookmarked, createdAt, lastReviewedAt',
+      records: '++id, type, promptId, selfRating, date, timestamp',
+      settings: 'key',
+      conversations: 'id, date, startedAt, mode, topic',
     });
   }
 }

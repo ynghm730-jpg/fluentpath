@@ -6,6 +6,7 @@ import { BottomNav } from './components/BottomNav';
 import { HomeView } from './components/HomeView';
 import { QuickPromptView } from './components/QuickPromptView';
 import { RepeatView } from './components/RepeatView';
+import { ConversationView } from './components/ConversationView';
 import { PhrasebookView } from './components/PhrasebookView';
 import { StatsDataView } from './components/StatsDataView';
 import { Toast, type ToastMessage } from './components/Toast';
@@ -163,6 +164,10 @@ export function App() {
             onShowToast={showToast}
             onRecordSaved={refreshAppData}
           />
+        )}
+
+        {activeTab === 'conversation' && (
+          <ConversationView onShowToast={showToast} />
         )}
 
         {activeTab === 'phrasebook' && (

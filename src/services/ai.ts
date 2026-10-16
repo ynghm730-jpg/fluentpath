@@ -1,4 +1,4 @@
-import type { AiReviewResult, AiReviewRequest } from '../types';
+import type { AiReviewResult, AiReviewRequest, ConversationTopic, ConversationLevel, ConversationTurn, ConversationFeedback } from '../types';
 
 export const DEFAULT_WORKER_URL = 'https://fluentpath-ai.y-n-g-h-m-730.workers.dev';
 
@@ -180,4 +180,41 @@ export async function requestAiReview(params: AiReviewRequest): Promise<AiReview
     throw new Error('添削結果に必要な項目が不足しています。');
   }
   return data.result as AiReviewResult;
+}
+
+
+// AI英会話は添削と同じWorker・AUTH_TOKENを使用する。
+async function callConversationEndpoint(path: string, payload: unknown): Promise<unknown> {
+  const token = getAiToken();
+  if (!token) throw new Error('認証トークン未設定：瞬間英作文のAI添削と同じAUTH_TOKENを入力してください。');
+  let response: Response;
+  try {
+    response = await fetch(`${getWorkerUrl().replace(/\/+$/, '')}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    });
+  } catch { throw new Error('Workerへ接続できません。ネットワークを確認してください。'); }
+  let data: unknown;
+  try { data = await response.json(); } catch { throw new Error('Workerからの応答を読み取れませんでした。'); }
+  if (!response.ok) {
+    const error = (data as { error?: { message?: string } })?.error?.message;
+    throw new Error(error || `AI通信エラー（HTTP ${response.status}）`);
+  }
+  return data;
+}
+
+export async function requestConversationReply(topic: ConversationTopic, level: ConversationLevel, turns: ConversationTurn[]): Promise<string> {
+  const data = await callConversationEndpoint('/api/conversation', { topic, level, turns }) as { reply?: unknown };
+  if (typeof data?.reply !== 'string' || !data.reply.trim()) throw new Error('AIの返答が空です。');
+  return data.reply;
+}
+
+export async function requestConversationFeedback(topic: ConversationTopic, level: ConversationLevel, turns: ConversationTurn[]): Promise<ConversationFeedback> {
+  const data = await callConversationEndpoint('/api/conversation/feedback', { topic, level, turns }) as { feedback?: ConversationFeedback };
+  const f = data?.feedback;
+  if (!f || !Array.isArray(f.positive) || !Array.isArray(f.corrections) || typeof f.summary !== 'string' || typeof f.nextStep !== 'string') {
+    throw new Error('AIからのフィードバックの形式が正しくありません。');
+  }
+  return f;
 }

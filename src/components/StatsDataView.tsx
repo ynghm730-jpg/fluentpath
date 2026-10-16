@@ -1,4 +1,4 @@
-import { useState, useEffect, type FC, type FormEvent } from 'react';
+import { useState, useEffect, type FC } from 'react';
 import {
   Trash2,
   Download,
@@ -8,7 +8,7 @@ import {
   Volume2,
 } from 'lucide-react';
 import type { StudyRecord } from '../types';
-import { db, getWeakRecords, getSetting, setSetting } from '../services/db';
+import { db, getWeakRecords } from '../services/db';
 import { speakText } from '../services/speech';
 import { downloadCSV } from '../utils/csv';
 
@@ -23,8 +23,7 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
 }) => {
   const [records, setRecords] = useState<StudyRecord[]>([]);
   const [weakRecords, setWeakRecords] = useState<StudyRecord[]>([]);
-  const [geminiApiKey, setGeminiApiKey] = useState<string>('');
-  const [isKeySaved, setIsKeySaved] = useState<boolean>(false);
+  const [hasLegacyKey, setHasLegacyKey] = useState(false);
   const [activeTab, setActiveTab] = useState<'stats' | 'weak' | 'settings'>('stats');
 
   // データロード
@@ -36,9 +35,7 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
       const weaks = await getWeakRecords();
       setWeakRecords(weaks);
 
-      const savedKey = await getSetting('gemini_api_key', '');
-      setGeminiApiKey(savedKey);
-      setIsKeySaved(!!savedKey);
+      setHasLegacyKey(Boolean(await db.settings.get('gemini_api_key')));
     } catch (err) {
       console.error('Failed to load stats:', err);
     }
@@ -69,22 +66,10 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
   const perfectRate =
     totalSessions > 0 ? Math.round((perfectCount / totalSessions) * 100) : 0;
 
-  // Gemini APIキーの保存
-  const handleSaveApiKey = async (e: FormEvent) => {
-    e.preventDefault();
-    try {
-      await setSetting('gemini_api_key', geminiApiKey.trim());
-      setIsKeySaved(!!geminiApiKey.trim());
-      onShowToast(
-        geminiApiKey.trim()
-          ? 'Gemini APIキーを端末内に安全に保存しました'
-          : 'APIキーを削除しました（AI不要モード）',
-        'success'
-      );
-    } catch (err) {
-      console.error('Failed to save API key:', err);
-      onShowToast('保存に失敗しました', 'error');
-    }
+  const deleteLegacyApiKey = async () => {
+    await db.settings.delete('gemini_api_key');
+    setHasLegacyKey(false);
+    onShowToast('古い端末内APIキーを削除しました', 'success');
   };
 
   // 全履歴のバックアップダウンロード（CSV）
@@ -360,44 +345,29 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
               <span>完全ローカル・プライバシー保証</span>
             </div>
             <p className="text-slate-600 leading-relaxed">
-              FluentPathは、すべての学習データ・フレーズ・音声をブラウザのIndexedDBにのみ保存します。
-              外部サーバーへの送信や有料課金は一切発生しません（開発費・運用費0円）。
+              練習履歴とフレーズ帳は原則この端末に保存されます。AI添削・AI英会話モードの
+              テキストはCloudflare Worker経由でGeminiに送信されます。音声入力はブラウザの
+              音声認識サービスを利用する場合があります。機密情報は入力しないでください。
             </p>
           </div>
 
-          {/* 将来のAI拡張：Gemini API設定 */}
-          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3 text-xs">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 font-bold text-slate-800">
-                <Key className="w-4 h-4 text-amber-500" />
-                <span>Gemini API設定（拡張・任意）</span>
-              </div>
-              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${isKeySaved ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
-                {isKeySaved ? 'APIキー登録中' : 'AI不要モード稼働中'}
-              </span>
+          {/* APIキーはCloudflareのみ。旧バージョンの端末保存キーは任意に削除 */}
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-2 text-xs">
+            <div className="flex items-center gap-2 font-bold text-slate-800">
+              <Key className="w-4 h-4 text-amber-500" />
+              <span>AIの接続方法</span>
             </div>
-
-            <p className="text-slate-500 leading-relaxed text-[11px]">
-              初期状態ではAI APIキーなしで全機能が快適に動作します。
-              将来、高度なAI文法添削を有効にしたい場合、Google AI Studioの無料APIキーを入力できます。
-              （※キーはブラウザ内のみに保存され、コードや外部には公開されません）
+            <p className="text-slate-600 leading-relaxed">
+              Gemini APIキーはCloudflare WorkerのSecretにのみ登録してください。
+              このブラウザにはGemini APIキーを入力・保存しないでください。
+              AI添削とAI英会話には個人専用のAUTH_TOKENを使用します。
             </p>
-
-            <form onSubmit={handleSaveApiKey} className="space-y-2">
-              <input
-                type="password"
-                value={geminiApiKey}
-                onChange={(e) => setGeminiApiKey(e.target.value)}
-                placeholder="AIzaSy... （無料のGemini APIキー）"
-                className="w-full p-2.5 rounded-xl border border-slate-200 focus:border-blue-500 outline-none text-xs"
-              />
-              <button
-                type="submit"
-                className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl transition-colors"
-              >
-                {geminiApiKey ? 'API設定を保存' : 'AI不要モードで使用'}
+            {hasLegacyKey && (
+              <button onClick={deleteLegacyApiKey}
+                className="w-full py-2.5 rounded-xl bg-rose-50 text-rose-700 font-bold border border-rose-200">
+                過去に端末に保存したAPIキーを削除する
               </button>
-            </form>
+            )}
           </div>
 
           {/* バックアップとデータ管理 */}
