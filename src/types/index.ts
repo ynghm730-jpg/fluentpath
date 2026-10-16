@@ -97,3 +97,19 @@ export interface ConversationSession {
   turns: ConversationTurn[];
   feedback?: ConversationFeedback;
 }
+
+// Phase 4: Spaced repetition is stored locally, separately from raw practice history.
+export interface ReviewCard {
+  id: string; // `${type}:${promptId}`
+  type: 'quick' | 'repeat';
+  promptId: string;
+  promptText: string;
+  modelAnswer: string;
+  lastResponse: string;
+  stage: number;
+  reviewCount: number;
+  dueDate: string; // YYYY-MM-DD, local date
+  createdAt: string;
+  updatedAt: string;
+  lastReviewedAt?: string;
+}

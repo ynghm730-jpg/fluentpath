@@ -190,7 +190,7 @@ export const HomeView: FC<HomeViewProps> = ({
       {/* 苦手復習クイックバナー（苦手問題がある場合） */}
       {weakCount > 0 && (
         <div
-          onClick={() => onNavigate('stats')}
+          onClick={() => onNavigate('review')}
           className="p-4 bg-rose-50 border border-rose-200 rounded-2xl flex items-center justify-between cursor-pointer hover:bg-rose-100/60 transition-colors"
         >
           <div className="flex items-center gap-3">
@@ -198,8 +198,8 @@ export const HomeView: FC<HomeViewProps> = ({
               {weakCount}
             </div>
             <div>
-              <h4 className="text-sm font-bold text-rose-900">要復習の苦手問題があります</h4>
-              <p className="text-xs text-rose-700">「言えなかった」とマークした問題を確認する</p>
+              <h4 className="text-sm font-bold text-rose-900">自動復習で弱点を定着させる</h4>
+              <p className="text-xs text-rose-700">復習予定を確認し、声に出して練習する</p>
             </div>
           </div>
           <ArrowRight className="w-5 h-5 text-rose-600" />

@@ -1,7 +1,7 @@
 import type { FC, ComponentType } from 'react';
-import { Home, Zap, Repeat, BookMarked, BarChart3, MessagesSquare } from 'lucide-react';
+import { Home, Zap, Repeat, BookMarked, BarChart3, MessagesSquare, BookOpenCheck } from 'lucide-react';
 
-export type TabType = 'home' | 'quick' | 'repeat' | 'conversation' | 'phrasebook' | 'stats';
+export type TabType = 'home' | 'quick' | 'repeat' | 'conversation' | 'phrasebook' | 'review' | 'stats';
 
 interface BottomNavProps {
   activeTab: TabType;
@@ -26,6 +26,7 @@ export const BottomNav: FC<BottomNavProps> = ({
     { id: 'quick', label: '瞬間英作文', icon: Zap },
     { id: 'repeat', label: 'リピート', icon: Repeat },
     { id: 'conversation', label: '英会話', icon: MessagesSquare },
+    { id: 'review', label: '復習', icon: BookOpenCheck },
     { id: 'phrasebook', label: 'フレーズ帳', icon: BookMarked, badge: phraseCount > 0 ? phraseCount : undefined },
     { id: 'stats', label: '履歴・設定', icon: BarChart3 },
   ];

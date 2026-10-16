@@ -16,6 +16,7 @@ import type { RepeatSentence, SelfRating, StudyRecord } from '../types';
 import { INITIAL_REPEAT_SENTENCES } from '../data/initialRepeatSentences';
 import { speakText, stopSpeaking, SpeechRecognizer, evaluateSimilarity } from '../services/speech';
 import { db } from '../services/db';
+import { saveStudyRecord, localDateKey } from '../services/review';
 
 interface RepeatViewProps {
   onShowToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
@@ -140,11 +141,11 @@ export const RepeatView: FC<RepeatViewProps> = ({
       responseTimeMs: responseTime,
       similarityScore: score,
       timestamp: new Date().toISOString(),
-      date: new Date().toISOString().split('T')[0],
+      date: localDateKey(),
     };
 
     try {
-      await db.records.add(record);
+      await saveStudyRecord(record);
       onRecordSaved();
       onShowToast(
         rating === 'perfect'

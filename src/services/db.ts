@@ -1,5 +1,5 @@
 import Dexie, { type Table } from 'dexie';
-import type { PhraseItem, StudyRecord, ConversationSession } from '../types';
+import type { PhraseItem, StudyRecord, ConversationSession, ReviewCard } from '../types';
 
 export interface AppSetting {
   key: string;
@@ -11,6 +11,7 @@ export class FluentPathDB extends Dexie {
   records!: Table<StudyRecord, number>;
   settings!: Table<AppSetting, string>;
   conversations!: Table<ConversationSession, string>;
+  reviews!: Table<ReviewCard, string>;
 
   constructor() {
     super('FluentPathDatabase');
@@ -26,6 +27,40 @@ export class FluentPathDB extends Dexie {
       records: '++id, type, promptId, selfRating, date, timestamp',
       settings: 'key',
       conversations: 'id, date, startedAt, mode, topic',
+    });
+    // New store only: do not clear or rewrite existing phrases, history, or conversations.
+    this.version(3).stores({
+      phrases: 'id, english, *tags, isBookmarked, createdAt, lastReviewedAt',
+      records: '++id, type, promptId, selfRating, date, timestamp',
+      settings: 'key',
+      conversations: 'id, date, startedAt, mode, topic',
+      reviews: 'id, dueDate, type, updatedAt',
+    }).upgrade(async (tx) => {
+      const previous = await tx.table('records').toArray() as StudyRecord[];
+      const latest = new Map<string, StudyRecord>();
+      // Auto-import only the most recent result for each original prompt.
+      previous.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || '') || (a.id || 0) - (b.id || 0));
+      for (const item of previous) {
+        if ((item.type === 'quick' || item.type === 'repeat') && item.promptId && item.modelAnswer) {
+          latest.set(`${item.type}:${item.promptId}`, item);
+        }
+      }
+      const now = new Date().toISOString();
+      const cards: ReviewCard[] = [...latest.values()]
+        .filter(r => r.selfRating === 'hard' || r.selfRating === 'good')
+        .map(r => {
+          const baseDate = new Date(r.timestamp);
+          const date = Number.isNaN(baseDate.getTime()) ? new Date() : baseDate;
+          const tomorrow = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
+          const dueDate = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
+          return {
+            id: `${r.type}:${r.promptId}`, type: r.type as 'quick' | 'repeat',
+            promptId: r.promptId, promptText: r.promptText,
+            modelAnswer: r.modelAnswer, lastResponse: r.userResponse,
+            stage: 0, reviewCount: 0, dueDate, createdAt: r.timestamp || now, updatedAt: now,
+          };
+        });
+      if (cards.length) await tx.table('reviews').bulkPut(cards);
     });
   }
 }

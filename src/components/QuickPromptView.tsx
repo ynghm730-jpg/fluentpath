@@ -18,6 +18,7 @@ import type { QuickPrompt, SelfRating, StudyRecord, AiReviewResult } from '../ty
 import { INITIAL_PROMPTS } from '../data/initialPrompts';
 import { speakText, stopSpeaking, SpeechRecognizer, evaluateSimilarity } from '../services/speech';
 import { db } from '../services/db';
+import { saveStudyRecord, localDateKey } from '../services/review';
 import { requestAiReview, getAiToken, setAiToken } from '../services/ai';
 
 interface QuickPromptViewProps {
@@ -198,11 +199,11 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
       responseTimeMs: responseTime,
       similarityScore: score,
       timestamp: new Date().toISOString(),
-      date: new Date().toISOString().split('T')[0],
+      date: localDateKey(),
     };
 
     try {
-      await db.records.add(record);
+      await saveStudyRecord(record);
       onRecordSaved();
       onShowToast(
         rating === 'perfect' ? '🎉 素晴らしい即答です！' : rating === 'good' ? '👍 惜しい！次回は完璧に！' : '💪 復習リストに追加しました',

@@ -1,7 +1,9 @@
-import { useState, useEffect, type FC } from 'react';
+import { useState, useEffect, useRef, type ChangeEvent, type FC } from 'react';
 import {
   Trash2,
   Download,
+  Upload,
+  FileArchive,
   Key,
   ShieldCheck,
   CheckCircle,
@@ -11,6 +13,7 @@ import type { StudyRecord } from '../types';
 import { db, getWeakRecords } from '../services/db';
 import { speakText } from '../services/speech';
 import { downloadCSV } from '../utils/csv';
+import { createBackup, downloadBackup, readBackupFile, mergeBackup } from '../services/backup';
 
 interface StatsDataViewProps {
   onShowToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
@@ -25,6 +28,8 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
   const [weakRecords, setWeakRecords] = useState<StudyRecord[]>([]);
   const [hasLegacyKey, setHasLegacyKey] = useState(false);
   const [activeTab, setActiveTab] = useState<'stats' | 'weak' | 'settings'>('stats');
+  const backupFileRef = useRef<HTMLInputElement>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
 
   // データロード
   const loadData = async () => {
@@ -111,11 +116,49 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
     onShowToast('学習履歴CSVをダウンロードしました', 'success');
   };
 
+  // Full JSON backup includes records, phrases, conversations, and review cards,
+  // but never auth tokens, API keys, or browser settings.
+  const handleBackup = async () => {
+    if (backupBusy) return;
+    setBackupBusy(true);
+    try {
+      downloadBackup(await createBackup());
+      onShowToast('学習データのJSONバックアップを保存しました', 'success');
+    } catch (e) {
+      onShowToast(`バックアップに失敗しました：${e instanceof Error ? e.message : '不明なエラー'}`, 'error');
+    } finally { setBackupBusy(false); }
+  };
+
+  const handleImportBackup = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || backupBusy) return;
+    setBackupBusy(true);
+    try {
+      const payload = await readBackupFile(file);
+      const { phrases, records, conversations, reviews } = payload.data;
+      const approved = window.confirm(
+        `バックアップ日時：${payload.exportedAt}\n` +
+        `フレーズ${phrases.length}件、練習${records.length}件、英会話${conversations.length}件、復習${reviews.length}件\n\n` +
+        '既存データは削除せず、重複を除いて追加・統合します。復元しますか？'
+      );
+      if (!approved) return;
+      const added = await mergeBackup(payload);
+      await loadData();
+      onRefreshData();
+      onShowToast(`統合完了：フレーズ${added.phrases}・練習${added.records}・英会話${added.conversations}・復習${added.reviews}件を追加`, 'success');
+    } catch (e) {
+      onShowToast(`復元に失敗しました（元のデータは維持されます）：${e instanceof Error ? e.message : '不明なエラー'}`, 'error');
+    } finally {
+      if (backupFileRef.current) backupFileRef.current.value = '';
+      setBackupBusy(false);
+    }
+  };
+
   // 履歴のリセット
   const handleClearHistory = async () => {
     if (
       confirm(
-        'これまでの学習履歴ログをすべて削除しますか？\n（※フレーズ帳のデータは削除されません）'
+        'これまでの学習履歴ログをすべて削除しますか？\n（※フレーズ帳・英会話履歴・復習予定は削除されません）'
       )
     ) {
       try {
@@ -373,6 +416,25 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
           {/* バックアップとデータ管理 */}
           <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-2.5 text-xs">
             <h3 className="font-bold text-slate-800">データバックアップ & メンテナンス</h3>
+            <p className="text-[11px] text-slate-600 leading-relaxed">
+              JSONバックアップはフレーズ帳・学習記録・AI英会話履歴・復習予定をまとめて保存します。
+              復元は既存データを消さない統合方式です。認証トークンとAPIキーは含みません。
+            </p>
+            <button disabled={backupBusy} onClick={handleBackup}
+              className="w-full py-3 px-3 border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 rounded-xl font-bold text-indigo-700 flex items-center justify-center gap-2 transition-colors">
+              <FileArchive className="w-4 h-4" />
+              <span>全学習データをJSONでバックアップ</span>
+            </button>
+            <input ref={backupFileRef} type="file" accept=".json,application/json" className="hidden" onChange={handleImportBackup} aria-label="バックアップJSONファイルを選択" />
+            <button disabled={backupBusy} onClick={() => backupFileRef.current?.click()}
+              className="w-full py-3 px-3 border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50 rounded-xl font-bold text-emerald-700 flex items-center justify-center gap-2 transition-colors">
+              <Upload className="w-4 h-4" />
+              <span>バックアップJSONから復元（追加・統合）</span>
+            </button>
+            <p className="text-[11px] text-amber-700 leading-relaxed">
+              JSONには練習英文や会話内容が含まれます。クラウドなどで公開せず、大切に保管してください。
+              旧バージョンのCSVは引き続き個別に使用できますが、完全復元はこのJSONを使ってください。
+            </p>
 
             <button
               onClick={handleExportHistory}

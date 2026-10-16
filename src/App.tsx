@@ -7,6 +7,7 @@ import { HomeView } from './components/HomeView';
 import { QuickPromptView } from './components/QuickPromptView';
 import { RepeatView } from './components/RepeatView';
 import { ConversationView } from './components/ConversationView';
+import { ReviewView } from './components/ReviewView';
 import { PhrasebookView } from './components/PhrasebookView';
 import { StatsDataView } from './components/StatsDataView';
 import { Toast, type ToastMessage } from './components/Toast';
@@ -168,6 +169,10 @@ export function App() {
 
         {activeTab === 'conversation' && (
           <ConversationView onShowToast={showToast} />
+        )}
+
+        {activeTab === 'review' && (
+          <ReviewView onShowToast={showToast} onRecordSaved={refreshAppData} />
         )}
 
         {activeTab === 'phrasebook' && (
