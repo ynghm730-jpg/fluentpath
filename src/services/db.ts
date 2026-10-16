@@ -70,7 +70,8 @@ export const db = new FluentPathDB();
 // 今日の学習記録を取得するヘルパー
 export async function getTodayRecords(): Promise<StudyRecord[]> {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     return await db.records.where('date').equals(today).toArray();
   } catch (err) {
     console.error('Failed to load today records from IndexedDB:', err);

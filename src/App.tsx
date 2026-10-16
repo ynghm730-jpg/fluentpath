@@ -12,6 +12,7 @@ import { PhrasebookView } from './components/PhrasebookView';
 import { StatsDataView } from './components/StatsDataView';
 import { Toast, type ToastMessage } from './components/Toast';
 import { db, getTodayRecords, getWeakRecords } from './services/db';
+import { calculateAnalytics } from './services/analytics';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<TabType>('home');
@@ -19,7 +20,7 @@ export function App() {
   const [todayRecords, setTodayRecords] = useState<StudyRecord[]>([]);
   const [phraseCount, setPhraseCount] = useState<number>(0);
   const [weakCount, setWeakCount] = useState<number>(0);
-  const [streakDays, setStreakDays] = useState<number>(1);
+  const [streakDays, setStreakDays] = useState<number>(0);
 
   // トースト表示ヘルパー
   const showToast = useCallback(
@@ -50,9 +51,9 @@ export function App() {
       const weaks = await getWeakRecords();
       setWeakCount(weaks.length);
 
-      // ストリーク計算（過去のユニークな日付数など）
-      const allDates = await db.records.orderBy('date').uniqueKeys();
-      setStreakDays(Math.max(1, allDates.length));
+      // 連続した回答日のみを数える（従来の累計日数表示を修正）。
+      const allRecords = await db.records.toArray();
+      setStreakDays(calculateAnalytics(allRecords, [], []).currentStreak);
     } catch (err) {
       console.error('Failed to sync app data:', err);
     }

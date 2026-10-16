@@ -9,7 +9,8 @@ import {
   CheckCircle,
   Volume2,
 } from 'lucide-react';
-import type { StudyRecord } from '../types';
+import type { StudyRecord, ReviewCard, ConversationSession } from '../types';
+import { AnalyticsDashboard } from './AnalyticsDashboard';
 import { db, getWeakRecords } from '../services/db';
 import { speakText } from '../services/speech';
 import { downloadCSV } from '../utils/csv';
@@ -25,23 +26,32 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
   onRefreshData,
 }) => {
   const [records, setRecords] = useState<StudyRecord[]>([]);
+  const [reviewCards, setReviewCards] = useState<ReviewCard[]>([]);
+  const [conversations, setConversations] = useState<ConversationSession[]>([]);
+  const [loadError, setLoadError] = useState(false);
   const [weakRecords, setWeakRecords] = useState<StudyRecord[]>([]);
   const [hasLegacyKey, setHasLegacyKey] = useState(false);
-  const [activeTab, setActiveTab] = useState<'stats' | 'weak' | 'settings'>('stats');
+  const [activeTab, setActiveTab] = useState<'analysis' | 'stats' | 'weak' | 'settings'>('analysis');
   const backupFileRef = useRef<HTMLInputElement>(null);
   const [backupBusy, setBackupBusy] = useState(false);
 
   // データロード
   const loadData = async () => {
     try {
-      const allRecords = await db.records.reverse().toArray();
+      const [allRecords, allReviews, allConversations] = await Promise.all([
+        db.records.reverse().toArray(), db.reviews.toArray(), db.conversations.toArray(),
+      ]);
       setRecords(allRecords);
+      setReviewCards(allReviews);
+      setConversations(allConversations);
+      setLoadError(false);
 
       const weaks = await getWeakRecords();
       setWeakRecords(weaks);
 
       setHasLegacyKey(Boolean(await db.settings.get('gemini_api_key')));
     } catch (err) {
+      setLoadError(true);
       console.error('Failed to load stats:', err);
     }
   };
@@ -174,8 +184,13 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
 
   return (
     <div className="space-y-4 pb-12 animate-in fade-in duration-300">
-      {/* 上部タブ切り替え */}
-      <div className="flex bg-slate-200/80 p-1 rounded-2xl text-xs font-semibold">
+      {loadError && <p role="alert" className="rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs p-3">学習データを読み込めませんでした。端末のストレージ設定をご確認ください。</p>}
+      {/* 既存の履歴・設定を残して、分析タブを新設 */}
+      <div className="flex bg-slate-200/80 p-1 rounded-2xl text-[11px] font-semibold">
+        <button onClick={() => setActiveTab('analysis')}
+          className={`flex-1 py-2 rounded-xl transition-all ${activeTab === 'analysis' ? 'bg-white text-blue-700 shadow-sm font-bold' : 'text-slate-600 hover:text-slate-900'}`}>
+          分析
+        </button>
         <button
           onClick={() => setActiveTab('stats')}
           className={`flex-1 py-2 rounded-xl transition-all ${
@@ -184,7 +199,7 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
               : 'text-slate-600 hover:text-slate-900'
           }`}
         >
-          学習統計
+          履歴
         </button>
         <button
           onClick={() => setActiveTab('weak')}
@@ -194,7 +209,7 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
               : 'text-slate-600 hover:text-slate-900'
           }`}
         >
-          <span>苦手問題</span>
+          <span>苦手</span>
           {weakRecords.length > 0 && (
             <span className="bg-rose-100 text-rose-600 text-[10px] px-1.5 py-0.2 rounded-full">
               {weakRecords.length}
@@ -209,9 +224,13 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
               : 'text-slate-600 hover:text-slate-900'
           }`}
         >
-          データ・設定
+          設定
         </button>
       </div>
+
+      {activeTab === 'analysis' && (
+        <AnalyticsDashboard records={records} reviews={reviewCards} conversations={conversations} />
+      )}
 
       {/* 1. 学習統計タブ */}
       {activeTab === 'stats' && (
