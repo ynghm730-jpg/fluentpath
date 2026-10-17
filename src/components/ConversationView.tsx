@@ -3,7 +3,7 @@ import { BookMarked, CheckCircle2, KeyRound, LoaderCircle, Mic, MicOff, RotateCc
 import type { ConversationFeedback, ConversationLevel, ConversationMode, ConversationSession, ConversationTopic, ConversationTurn, MeetingScenarioId, SelfRating } from '../types';
 import { MEETING_SCENARIOS, MEETING_SCENARIO_IDS, getMeetingAnswer, getMeetingQuestion } from '../data/meetingScenarios';
 import { db } from '../services/db';
-import { getAiToken, requestConversationFeedback, requestConversationReply, setAiToken } from '../services/ai';
+import { getAiToken, requestConversationFeedback, requestConversationReplyStreaming, setAiToken } from '../services/ai';
 import { SpeechRecognizer, speakText, stopSpeaking } from '../services/speech';
 
 interface Props { onShowToast: (message: string, type?: 'success' | 'error' | 'info') => void; }
@@ -55,6 +55,8 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
   const [active, setActive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  // UI-only timing: does not record personal messages or add to backups.
+  const [latency, setLatency] = useState<{ firstMs: number; totalMs?: number } | null>(null);
   const [error, setError] = useState('');
   const [tokenInput, setTokenInput] = useState('');
   const [rememberToken, setRememberToken] = useState(true);
@@ -97,6 +99,7 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
     stopSpeaking();
     recognizer.current?.stop();
     setIsListening(false);
+    setLatency(null);
     setTurns([{ role: 'assistant', text: first }]);
     setDraft(''); setFinished(false); setFeedback(null); setError(''); setSavedCorrections([]);
     setMeetingSelfRating(null); setShowMeetingHint(false);
@@ -108,6 +111,7 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
   const changeMode = (next: ConversationMode) => {
     if (pending.current || (active && !finished)) return;
     stopSpeaking(); recognizer.current?.stop(); setIsListening(false);
+    setLatency(null);
     setActive(false); setFinished(false); setTurns([]); setDraft('');
     setFeedback(null); setError(''); setSavedCorrections([]);
     setMeetingSelfRating(null); setShowMeetingHint(false);
@@ -134,7 +138,7 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
     if (message.length > 450) { setError('回答は450文字以内で入力してください。'); return; }
     if (replies >= maxTurns) return;
     if (usesAiReplies && !getAiToken()) { setIsTokenOpen(true); return; }
-    pending.current = true; setBusy(true); setError('');
+    pending.current = true; setBusy(true); setError(''); setLatency(null);
     recognizer.current?.stop(); setIsListening(false); stopSpeaking();
     const userTurn: ConversationTurn = { role: 'user', text: message };
     const nextTurns = [...turns, userTurn];
@@ -146,14 +150,23 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
       } else if (mode === 'script') {
         reply = SCENARIOS[topic].scripted[Math.min(replies, MAX_TURNS - 1)];
       } else {
-        reply = await requestConversationReply(isAdaptiveMeeting ? 'meeting' : topic, level, nextTurns);
+        const started = performance.now();
+        let firstMs: number | undefined;
+        reply = await requestConversationReplyStreaming(isAdaptiveMeeting ? 'meeting' : topic, level, nextTurns, partial => {
+          if (firstMs === undefined) {
+            firstMs = performance.now() - started;
+            setLatency({ firstMs });
+          }
+          setTurns([...nextTurns, { role: 'assistant', text: partial }]);
+        });
+        setLatency({ firstMs: firstMs ?? performance.now() - started, totalMs: performance.now() - started });
       }
       setTurns([...nextTurns, { role: 'assistant', text: reply }]);
       setShowMeetingHint(false);
       speakText(reply, level === 'B1' ? 0.88 : 0.96);
     } catch (e) {
       // Restore draft/previous transcript so the user can retry without duplicated turns.
-      setTurns(turns); setDraft(message);
+      setTurns(turns); setDraft(message); setLatency(null);
       setError(e instanceof Error ? e.message : '応答できませんでした。少し時間をおいてください。');
     } finally { pending.current = false; setBusy(false); }
   };
@@ -190,7 +203,7 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
   };
 
   const retryFeedback = async () => {
-    if (!finished || !usesAiFeedback || pending.current || feedback) return;
+    if (!finished || !usesAiFeedback || pending.current || (feedback && feedback.corrections.length >= replies)) return;
     if (!getAiToken()) { setIsTokenOpen(true); return; }
     pending.current = true; setBusy(true); setError('');
     // 固定会議の全6回答を含めつつ、Workerの最大12発言制限を守る。
@@ -217,6 +230,7 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
     setMode(item.mode); setTopic(item.topic); setLevel(item.level);
     setMeetingScenarioId(item.meetingScenarioId || 'progress');
     setMeetingSelfRating(item.meetingSelfRating || null); setShowMeetingHint(false);
+    setLatency(null);
     setTurns(item.turns); setFeedback(item.feedback || null); setFinished(true);
     setActive(true); setError(''); setSavedCorrections([]); setDraft('');
     setStartedAt(item.startedAt); setSessionId(item.id);
@@ -296,10 +310,11 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
             <div className={`max-w-[91%] text-sm rounded-2xl p-3 leading-relaxed ${t.role === 'user' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-800'}`}>
               <div className={`text-[10px] font-bold mb-1 ${t.role === 'user' ? 'text-blue-100' : 'text-slate-500'}`}>{t.role === 'user' ? 'You' : mode === 'ai' ? 'AI partner' : isMeeting ? 'Meeting colleague' : 'Scenario'}</div>
               {t.text}
-              {t.role === 'assistant' && <button title="英文をもう一度読み上げ" aria-label="英文を読み上げ" className="block mt-2 text-blue-600" onClick={() => speakText(t.text, level === 'B1' ? 0.88 : 0.96)}><Volume2 className="w-4 h-4" /></button>}
+              {t.role === 'assistant' && t.text && <button title="英文をもう一度読み上げ" aria-label="英文を読み上げ" className="block mt-2 text-blue-600" onClick={() => speakText(t.text, level === 'B1' ? 0.88 : 0.96)}><Volume2 className="w-4 h-4" /></button>}
             </div>
           </div>)}
-          {busy && <div className="text-xs text-indigo-700 flex items-center gap-2"><LoaderCircle className="w-4 h-4 animate-spin"/> {finished ? 'フィードバックを作成中...' : 'AIの返答を生成中...'}</div>}
+          {busy && <div className="text-xs text-indigo-700 flex items-center gap-2"><LoaderCircle className="w-4 h-4 animate-spin"/> {finished ? 'フィードバックを作成中...' : latency ? '英文を受信中...' : 'AIの返答を待っています...'}</div>}
+          {latency && !finished && !busy && <p className="text-[11px] text-slate-500">今回の応答：最初の英文まで {(latency.firstMs / 1000).toFixed(1)}秒 / 完了まで {((latency.totalMs || latency.firstMs) / 1000).toFixed(1)}秒（参考値）</p>}
         </div>
         {error && <div role="alert" className="rounded-xl p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs leading-relaxed">{error}{finished && usesAiFeedback && !feedback && <button onClick={retryFeedback} disabled={busy} className="block mt-2 font-bold underline">後でAI添削を試す</button>}</div>}
 
@@ -346,16 +361,27 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
             <p className="text-sm text-slate-700">{feedback.summary}</p>
             <h4 className="text-xs font-bold text-green-700">良かった表現</h4>
             {feedback.positive.map((p, i) => <p className="text-xs bg-green-50 rounded-lg p-2" key={i}>{p}</p>)}
-            <h4 className="text-xs font-bold text-indigo-800">より自然な言い換え</h4>
+            <h4 className="text-xs font-bold text-indigo-800">あなたの発言を1回ずつ振り返る</h4>
+            <p className="text-[11px] text-slate-500">今回のあなたの回答：{replies}回 ／ 添削が表示された回答：{feedback.corrections.length}回。正しい英文も含めて、自然な別表現を確認できます。</p>
             {feedback.corrections.length === 0 && <p className="text-xs text-slate-500">今回、修正候補は提示されませんでした。</p>}
-            {feedback.corrections.map((c, i) => <div className="bg-slate-50 rounded-xl p-3 space-y-1 text-xs" key={i}>
-              <p><strong>元の文：</strong>{c.original}</p>
-              <p className="text-indigo-800"><strong>修正版：</strong>{c.revised}</p>
-              <p><strong>日本語訳：</strong>{c.japanese}</p>
-              <p><strong>解説：</strong>{c.explanation}</p>
-              <button className="mt-2 mr-4 text-blue-700 font-bold inline-flex items-center gap-1" onClick={() => speakText(c.revised, 0.9)}><Volume2 className="w-4 h-4" />修正版を読み上げ</button>
-              <button disabled={savedCorrections.includes(i)} className="mt-2 text-blue-700 font-bold inline-flex items-center gap-1 disabled:text-green-700" onClick={() => saveCorrection(i)}>{savedCorrections.includes(i) ? <CheckCircle2 className="w-4 h-4" /> : <BookMarked className="w-4 h-4" />} {savedCorrections.includes(i) ? '保存済み' : 'フレーズ帳に保存'}</button>
-            </div>)}
+            {feedback.corrections.map((c, i) => {
+              // Older saved reviews had at most three selected corrections and no turn number.
+              // Do not assign a possibly incorrect question to those historical reviews.
+              const index = typeof c.turnNumber === 'number' && Number.isInteger(c.turnNumber) && c.turnNumber >= 1 && c.turnNumber <= replies ? c.turnNumber - 1 : -1;
+              const question = index >= 0 ? turns[index * 2]?.text : undefined;
+              return <div className="bg-slate-50 rounded-xl p-3 space-y-1.5 text-xs" key={i}>
+                <h5 className="font-bold text-indigo-800">{index >= 0 ? `${index + 1}回目の回答` : `言い換え・添削 ${i + 1}`}</h5>
+                {question && <p className="rounded-lg bg-white border border-slate-200 p-2"><strong>AIからの質問：</strong>{question}</p>}
+                <p><strong>元の文：</strong>{c.original}</p>
+                {c.goodPoint && <p className="text-emerald-800"><strong>良かった点：</strong>{c.goodPoint}</p>}
+                <p className="text-indigo-800"><strong>自然な言い換え：</strong>{c.revised}</p>
+                <p><strong>日本語訳：</strong>{c.japanese}</p>
+                <p><strong>解説：</strong>{c.explanation}</p>
+                <button className="mt-2 mr-4 text-blue-700 font-bold inline-flex items-center gap-1" onClick={() => speakText(c.revised, 0.9)}><Volume2 className="w-4 h-4" />修正版を読み上げ</button>
+                <button disabled={savedCorrections.includes(i)} className="mt-2 text-blue-700 font-bold inline-flex items-center gap-1 disabled:text-green-700" onClick={() => saveCorrection(i)}>{savedCorrections.includes(i) ? <CheckCircle2 className="w-4 h-4" /> : <BookMarked className="w-4 h-4" />} {savedCorrections.includes(i) ? '保存済み' : 'フレーズ帳に保存'}</button>
+              </div>;
+            })}
+            {usesAiFeedback && feedback.corrections.length < replies && <button disabled={busy} onClick={retryFeedback} className="w-full rounded-xl bg-indigo-600 py-3 text-white font-bold text-xs disabled:opacity-50">以前の添削は一部の回答のみです。全{replies}回答を再添削する（Gemini API1回）</button>}
             <p className="text-xs text-slate-600"><strong>次回の練習ポイント：</strong>{feedback.nextStep}</p>
           </>}
           {usesAiReplies && !feedback && <p className="text-xs text-slate-500">AIの無料枠を使い切った場合でも、会話履歴は端末に保存されます。必要に応じて後から添削を再試行できます。</p>}

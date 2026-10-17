@@ -80,7 +80,15 @@ export type ConversationMode = 'ai' | 'script' | 'meeting_script' | 'meeting_ai'
 export type ConversationLevel = 'B1' | 'B2';
 export type ConversationTopic = 'cafe' | 'airport' | 'hotel' | 'meeting' | 'intro' | 'travel';
 export interface ConversationTurn { role: 'assistant' | 'user'; text: string; }
-export interface ConversationCorrection { original: string; revised: string; japanese: string; explanation: string; }
+// Old saved reviews may lack turnNumber / goodPoint. New reviews include both.
+export interface ConversationCorrection {
+  original: string;
+  revised: string;
+  japanese: string;
+  explanation: string;
+  turnNumber?: number;
+  goodPoint?: string;
+}
 export interface ConversationFeedback {
   positive: string[];
   corrections: ConversationCorrection[];

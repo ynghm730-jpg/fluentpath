@@ -210,6 +210,74 @@ export async function requestConversationReply(topic: ConversationTopic, level: 
   return data.reply;
 }
 
+/** Show the reply as it arrives rather than waiting for Gemini to finish.
+ * Falls back to the existing endpoint when an older Worker lacks streaming.
+ */
+export async function requestConversationReplyStreaming(
+  topic: ConversationTopic, level: ConversationLevel, turns: ConversationTurn[],
+  onPartial: (text: string) => void,
+): Promise<string> {
+  const token = getAiToken();
+  if (!token) throw new Error('認証トークンが未設定です。');
+  let response: Response;
+  try {
+    response = await fetch(`${getWorkerUrl().replace(/\/+$/, '')}/api/conversation/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ topic, level, turns }),
+    });
+  } catch { throw new Error('Workerへ接続できません。ネットワークを確認してください。'); }
+
+  if (response.status === 404 || response.status === 405) {
+    const oldReply = await requestConversationReply(topic, level, turns);
+    onPartial(oldReply);
+    return oldReply;
+  }
+  if (!response.ok) {
+    let err: { error?: { message?: string } } = {};
+    try { err = await response.json(); } catch { /* keep HTTP fallback */ }
+    throw new Error(err.error?.message || `AI通信エラー（HTTP ${response.status}）`);
+  }
+  if (!response.body) throw new Error('この環境ではストリーミング応答を読み取れません。');
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let allText = '';
+  let finished = false;
+  function consume(block: string) {
+    const lines = block.split('\n');
+    const event = lines.find(line => line.startsWith('event:'))?.slice(6).trim();
+    const json = lines.filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+    if (!json) return;
+    let parsed: { text?: unknown; message?: unknown };
+    try { parsed = JSON.parse(json); } catch { throw new Error('AIストリームの形式が不正です。'); }
+    if (event === 'error') throw new Error(typeof parsed.message === 'string' ? parsed.message : 'AIの応答が途中で停止しました。');
+    if (event === 'chunk' && typeof parsed.text === 'string') {
+      allText += parsed.text;
+      onPartial(allText);
+    }
+    if (event === 'done') finished = true;
+  }
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      buffer = buffer.replace(/\r\n/g, '\n');
+      const blocks = buffer.split('\n\n');
+      buffer = blocks.pop() || '';
+      for (const block of blocks) consume(block);
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) consume(buffer);
+  } catch (e) {
+    throw e instanceof Error ? e : new Error('AIとのストリーミング接続が切断されました。');
+  } finally { reader.releaseLock(); }
+  if (!finished || !allText.trim()) throw new Error('AIの応答を最後まで受信できませんでした。');
+  return allText.trim();
+}
+
 export async function requestConversationFeedback(topic: ConversationTopic, level: ConversationLevel, turns: ConversationTurn[]): Promise<ConversationFeedback> {
   const data = await callConversationEndpoint('/api/conversation/feedback', { topic, level, turns }) as { feedback?: ConversationFeedback };
   const f = data?.feedback;
