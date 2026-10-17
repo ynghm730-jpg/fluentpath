@@ -9,8 +9,9 @@ import {
   CheckCircle,
   Volume2,
 } from 'lucide-react';
-import type { StudyRecord, ReviewCard, ConversationSession } from '../types';
+import type { StudyRecord, ReviewCard, ConversationSession, QuickResponseAttempt } from '../types';
 import { AnalyticsDashboard } from './AnalyticsDashboard';
+import { SpeakingDashboard } from './SpeakingDashboard';
 import { db, getWeakRecords } from '../services/db';
 import { speakText } from '../services/speech';
 import { downloadCSV } from '../utils/csv';
@@ -28,6 +29,8 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
   const [records, setRecords] = useState<StudyRecord[]>([]);
   const [reviewCards, setReviewCards] = useState<ReviewCard[]>([]);
   const [conversations, setConversations] = useState<ConversationSession[]>([]);
+  const [quickResponses, setQuickResponses] = useState<QuickResponseAttempt[]>([]);
+  const [analyticsTab, setAnalyticsTab] = useState<'general' | 'speaking'>('general');
   const [loadError, setLoadError] = useState(false);
   const [weakRecords, setWeakRecords] = useState<StudyRecord[]>([]);
   const [hasLegacyKey, setHasLegacyKey] = useState(false);
@@ -38,12 +41,13 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
   // データロード
   const loadData = async () => {
     try {
-      const [allRecords, allReviews, allConversations] = await Promise.all([
-        db.records.reverse().toArray(), db.reviews.toArray(), db.conversations.toArray(),
+      const [allRecords, allReviews, allConversations, allQuickResponses] = await Promise.all([
+        db.records.reverse().toArray(), db.reviews.toArray(), db.conversations.toArray(), db.quickResponses.toArray(),
       ]);
       setRecords(allRecords);
       setReviewCards(allReviews);
       setConversations(allConversations);
+      setQuickResponses(allQuickResponses);
       setLoadError(false);
 
       const weaks = await getWeakRecords();
@@ -229,7 +233,21 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
       </div>
 
       {activeTab === 'analysis' && (
-        <AnalyticsDashboard records={records} reviews={reviewCards} conversations={conversations} />
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-1 rounded-xl bg-slate-200/80 p-1" aria-label="分析種類">
+            <button type="button" onClick={() => setAnalyticsTab('general')} aria-pressed={analyticsTab === 'general'}
+              className={`rounded-lg py-2 text-xs font-bold ${analyticsTab === 'general' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600'}`}>
+              総合分析
+            </button>
+            <button type="button" onClick={() => setAnalyticsTab('speaking')} aria-pressed={analyticsTab === 'speaking'}
+              className={`rounded-lg py-2 text-xs font-bold ${analyticsTab === 'speaking' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-600'}`}>
+              スピーキング
+            </button>
+          </div>
+          {analyticsTab === 'general'
+            ? <AnalyticsDashboard records={records} reviews={reviewCards} conversations={conversations} />
+            : <SpeakingDashboard quickResponses={quickResponses} conversations={conversations} reviews={reviewCards} />}
+        </div>
       )}
 
       {/* 1. 学習統計タブ */}
