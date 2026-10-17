@@ -76,7 +76,7 @@ export interface AiReviewRequest {
 
 
 // AI英会話：回答を含む会話履歴は端末にのみ保存
-export type ConversationMode = 'ai' | 'script';
+export type ConversationMode = 'ai' | 'script' | 'meeting_script' | 'meeting_ai';
 export type ConversationLevel = 'B1' | 'B2';
 export type ConversationTopic = 'cafe' | 'airport' | 'hotel' | 'meeting' | 'intro' | 'travel';
 export interface ConversationTurn { role: 'assistant' | 'user'; text: string; }
@@ -87,6 +87,7 @@ export interface ConversationFeedback {
   summary: string;
   nextStep: string;
 }
+export type MeetingScenarioId = 'progress' | 'technical' | 'schedule' | 'support' | 'opinions' | 'questions';
 export interface ConversationSession {
   id: string;
   date: string;
@@ -95,6 +96,9 @@ export interface ConversationSession {
   level: ConversationLevel;
   topic: ConversationTopic;
   turns: ConversationTurn[];
+  // Phase 6B-1: 既存の会話履歴と同じIndexedDBで保存。
+  meetingScenarioId?: MeetingScenarioId;
+  meetingSelfRating?: SelfRating;
   feedback?: ConversationFeedback;
 }
 

@@ -1,6 +1,7 @@
 import type { PhraseItem, StudyRecord, ConversationSession, ReviewCard, QuickResponseAttempt } from '../types';
 import { db } from './db';
 import { REVIEW_INTERVAL_DAYS } from './review';
+import { MEETING_SCENARIO_IDS } from '../data/meetingScenarios';
 
 const BACKUP_FORMAT_VERSION = 1;
 const MAX_BACKUP_BYTES = 20 * 1024 * 1024;
@@ -58,8 +59,11 @@ function validRecord(v: unknown): v is StudyRecord {
 }
 function validConversation(v: unknown): v is ConversationSession {
   return isObject(v) && isString(v.id) && isString(v.date) && isString(v.startedAt)
-    && ['ai', 'script'].includes(String(v.mode)) && ['B1', 'B2'].includes(String(v.level))
+    && ['ai', 'script', 'meeting_script', 'meeting_ai'].includes(String(v.mode)) && ['B1', 'B2'].includes(String(v.level))
     && ['cafe', 'airport', 'hotel', 'meeting', 'intro', 'travel'].includes(String(v.topic))
+    && (!['meeting_script', 'meeting_ai'].includes(String(v.mode)) || (isString(v.meetingScenarioId) && (MEETING_SCENARIO_IDS as readonly string[]).includes(v.meetingScenarioId)))
+    && (v.meetingScenarioId === undefined || (isString(v.meetingScenarioId) && (MEETING_SCENARIO_IDS as readonly string[]).includes(v.meetingScenarioId)))
+    && (v.meetingSelfRating === undefined || ['perfect', 'good', 'hard'].includes(String(v.meetingSelfRating)))
     && Array.isArray(v.turns) && v.turns.every(t => isObject(t) && ['assistant', 'user'].includes(String(t.role)) && isString(t.text));
 }
 function validReview(v: unknown): v is ReviewCard {
