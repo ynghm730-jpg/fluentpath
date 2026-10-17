@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type FC } from 'react';
-import { ArrowRight, CheckCircle2, Clock3, Headphones, Mic, MicOff, Play, RotateCcw, Volume2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type FC, type FormEvent } from 'react';
+import { ArrowRight, BookmarkPlus, Bot, CheckCircle2, Clock3, Headphones, Loader2, Mic, MicOff, Play, RotateCcw, Volume2, X } from 'lucide-react';
 import { QUICK_RESPONSE_QUESTIONS, type QuickResponseCategory } from '../data/quickResponseQuestions';
 import { db } from '../services/db';
+import { getAiToken, requestAiReview, setAiToken } from '../services/ai';
 import { isSpeechRecognitionSupported, speakText, SpeechRecognizer, stopSpeaking } from '../services/speech';
-import type { QuickResponseAttempt, SelfRating } from '../types';
+import type { AiReviewResult, QuickResponseAttempt, SelfRating } from '../types';
 
 interface Props {
   onShowToast: (message: string, type?: 'success' | 'error' | 'info') => void;
@@ -41,6 +42,15 @@ export const QuickResponseView: FC<Props> = ({ onShowToast }) => {
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [history, setHistory] = useState<QuickResponseAttempt[]>([]);
+  // Phase 6A+: existing Gemini review Worker /api/review; no new Worker route.
+  const [aiReview, setAiReview] = useState<AiReviewResult | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState('');
+  const [tokenModalOpen, setTokenModalOpen] = useState(false);
+  const [tokenInput, setTokenInput] = useState('');
+  const [rememberToken, setRememberToken] = useState(false);
+  const [phraseSaving, setPhraseSaving] = useState(false);
+  const [phraseSaved, setPhraseSaved] = useState(false);
 
   const questions = useMemo(
     () => QUICK_RESPONSE_QUESTIONS.filter(q => category === 'all' || q.category === category),
@@ -58,6 +68,9 @@ export const QuickResponseView: FC<Props> = ({ onShowToast }) => {
   const inputModeRef = useRef<'voice' | 'text' | 'none'>('none');
   const elapsedFinalRef = useRef(0);
   const savedRef = useRef(false);
+  const aiGenerationRef = useRef(0); // ignore late results when the question changes/unmounts
+  const aiRequestInFlightRef = useRef(false);
+  const phraseSaveInFlightRef = useRef(false);
 
   async function loadHistory() {
     try {
@@ -74,6 +87,7 @@ export const QuickResponseView: FC<Props> = ({ onShowToast }) => {
     void loadHistory();
     return () => {
       runIdRef.current += 1;
+      aiGenerationRef.current += 1;
       recognizerRef.current?.stop();
       stopSpeaking();
     };
@@ -99,6 +113,15 @@ export const QuickResponseView: FC<Props> = ({ onShowToast }) => {
   };
 
   const start = () => {
+    aiGenerationRef.current += 1;
+    setAiReview(null);
+    setAiError('');
+    setAiLoading(false);
+    aiRequestInFlightRef.current = false;
+    setPhraseSaved(false);
+    setPhraseSaving(false);
+    phraseSaveInFlightRef.current = false;
+    setTokenModalOpen(false);
     stopSpeaking();
     recognizerRef.current?.stop();
     runIdRef.current += 1;
@@ -190,6 +213,15 @@ export const QuickResponseView: FC<Props> = ({ onShowToast }) => {
 
   const next = () => {
     if (!saved || phase !== 'review') return;
+    aiGenerationRef.current += 1;
+    setAiReview(null);
+    setAiError('');
+    setAiLoading(false);
+    aiRequestInFlightRef.current = false;
+    setPhraseSaved(false);
+    setPhraseSaving(false);
+    phraseSaveInFlightRef.current = false;
+    setTokenModalOpen(false);
     setIndex(current => (current + 1) % questions.length);
     setPhase('ready');
     setAnswer('');
@@ -197,6 +229,97 @@ export const QuickResponseView: FC<Props> = ({ onShowToast }) => {
     setFirstInputMs(null);
     setFirstInputMode('none');
     setSaved(false);
+  };
+
+  // AI review is optional and intentionally not part of quick-response timing or self-rating.
+  // The fixed example is a reference, NOT the only acceptable answer.
+  const requestQuickReview = async () => {
+    if (phase !== 'review' || aiRequestInFlightRef.current) return;
+    const userEnglish = answer.trim();
+    if (!userEnglish) {
+      setAiError('回答がありません。Gemini添削には英文を入力してください。');
+      return;
+    }
+    if (userEnglish.length > 500) {
+      setAiError('AI添削できる回答は500文字までです。');
+      return;
+    }
+    if (!getAiToken()) {
+      setTokenInput('');
+      setTokenModalOpen(true);
+      return;
+    }
+
+    const generation = aiGenerationRef.current;
+    aiRequestInFlightRef.current = true;
+    setAiLoading(true);
+    setAiError('');
+    setAiReview(null);
+    setPhraseSaved(false);
+    try {
+      const result = await requestAiReview({
+        userEnglish,
+        japanesePrompt: `英語の質問への即答練習です。質問への答えとして適切かを確認し、文法と自然さを添削してください。質問: ${question.english}（${question.japanese}）`,
+        modelAnswer: question.sampleAnswer,
+      });
+      if (generation !== aiGenerationRef.current) return;
+      setAiReview(result);
+      setPhraseSaved(false);
+      onShowToast('クイックレスポンスのAI添削が完了しました', 'success');
+    } catch (error: unknown) {
+      if (generation !== aiGenerationRef.current) return;
+      const message = error instanceof Error ? error.message : 'AI添削に失敗しました。';
+      setAiError(message);
+      if (message.includes('401') || message.includes('NO_TOKEN')) {
+        setTokenInput('');
+        setTokenModalOpen(true);
+      }
+    } finally {
+      if (generation === aiGenerationRef.current) {
+        aiRequestInFlightRef.current = false;
+        setAiLoading(false);
+      }
+    }
+  };
+
+  const saveTokenAndReview = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!tokenInput.trim()) return;
+    setAiToken(tokenInput, rememberToken);
+    setTokenInput('');
+    setTokenModalOpen(false);
+    void requestQuickReview();
+  };
+
+  const saveRevisedPhrase = async () => {
+    if (!aiReview || phraseSaved || phraseSaveInFlightRef.current) return;
+    const generation = aiGenerationRef.current;
+    phraseSaveInFlightRef.current = true;
+    setPhraseSaving(true);
+    try {
+      await db.phrases.put({
+        id: createId('phrase-quick-response-ai'),
+        english: aiReview.revised,
+        japanese: aiReview.revisedJapanese,
+        notes: `即答トレの質問: ${question.english}\n元の回答: ${answer.trim()}\n${aiReview.grammarExplanation}`,
+        tags: ['即答トレ', 'AI添削', question.category === 'business' ? '仕事' : '日常'],
+        isBookmarked: true,
+        reviewCount: 0,
+        createdAt: new Date().toISOString(),
+      });
+      if (generation === aiGenerationRef.current) {
+        setPhraseSaved(true);
+        onShowToast('AI修正版をフレーズ帳に保存しました', 'success');
+      }
+    } catch (error) {
+      console.error('Could not save AI phrase:', error);
+      if (generation === aiGenerationRef.current) onShowToast('フレーズ帳への保存に失敗しました', 'error');
+    } finally {
+      if (generation === aiGenerationRef.current) {
+        phraseSaveInFlightRef.current = false;
+        setPhraseSaving(false);
+      }
+    }
   };
 
   const resetCategory = (nextCategory: CategoryFilter) => {
@@ -219,7 +342,7 @@ export const QuickResponseView: FC<Props> = ({ onShowToast }) => {
         <div className="flex items-center gap-2 text-indigo-700 font-extrabold text-lg">
           <Clock3 className="w-5 h-5" /> クイックレスポンス
         </div>
-        <p className="text-sm text-slate-600">英語の質問に、考えすぎず素早く答える練習です。Gemini APIは使いません。</p>
+        <p className="text-sm text-slate-600">英語の質問に素早く答える練習です。基本練習は無料・API不要。回答後に任意でGemini AI添削も利用できます。</p>
       </header>
 
       <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
@@ -325,6 +448,54 @@ export const QuickResponseView: FC<Props> = ({ onShowToast }) => {
                   <p>目標 {limit} 秒：<strong>{firstInputMs === null ? '未達成' : firstInputMs <= limit * 1000 ? '達成' : '未達成'}</strong></p>
                   <p>終了までの時間：{seconds(elapsedMs)}秒</p>
                 </div>
+                {/* Phase 6A+: optional Gemini review after the timed response is complete. */}
+                <div className="border-2 border-indigo-100 bg-indigo-50/50 rounded-2xl p-3 space-y-3">
+                  <div className="flex items-center gap-2 font-extrabold text-indigo-900 text-sm">
+                    <Bot className="w-5 h-5" /> GeminiによるAI添削（任意）
+                  </div>
+                  <p className="text-xs text-slate-600">質問への答え方・文法・自然なアメリカ英語を確認します。回答時間と自己評価には影響しません。</p>
+                  <button type="button" disabled={aiLoading || !answer.trim()} onClick={() => void requestQuickReview()}
+                    className="w-full flex items-center justify-center gap-2 rounded-xl bg-indigo-600 text-white font-bold text-sm py-3 disabled:opacity-50">
+                    {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Bot className="w-4 h-4" />}
+                    {aiLoading ? 'Geminiで添削中…' : aiReview ? 'もう一度AI添削する' : 'この回答をAI添削する'}
+                  </button>
+                  {!answer.trim() && <p className="text-xs text-slate-500">回答が空欄のためAI添削は利用できません。</p>}
+                  {aiError && (
+                    <div role="alert" className="rounded-xl bg-rose-50 border border-rose-200 p-3 text-xs text-rose-800 space-y-2">
+                      <p className="font-bold">AI添削エラー</p>
+                      <p className="break-words">{aiError}</p>
+                      {(aiError.includes('401') || aiError.includes('NO_TOKEN')) && (
+                        <button type="button" onClick={() => { setTokenInput(''); setTokenModalOpen(true); }} className="text-indigo-700 font-bold underline">アクセストークンを再設定</button>
+                      )}
+                    </div>
+                  )}
+                  {aiReview && (
+                    <div className="bg-white border border-indigo-200 rounded-2xl p-3 space-y-3 text-sm">
+                      <div className="border-b border-indigo-100 pb-2 font-bold text-indigo-900">AI英文添削レポート</div>
+                      <div className="space-y-1">
+                        <p className="text-xs font-bold text-slate-500">あなたの回答</p>
+                        <p className="text-slate-800 whitespace-pre-wrap break-words">{aiReview.original}</p>
+                      </div>
+                      <div className="rounded-xl bg-indigo-50 p-3 space-y-1">
+                        <div className="flex justify-between gap-2 items-start">
+                          <p className="text-xs font-bold text-indigo-800">修正版（アメリカ英語）</p>
+                          <button type="button" onClick={() => speakText(aiReview.revised)} aria-label="AI修正版を読み上げる" className="text-indigo-700 p-1 rounded-lg bg-white"><Volume2 className="w-4 h-4" /></button>
+                        </div>
+                        <p className="font-bold text-slate-900 whitespace-pre-wrap break-words">{aiReview.revised}</p>
+                        <p className="text-xs text-slate-600 whitespace-pre-wrap">{aiReview.revisedJapanese}</p>
+                      </div>
+                      <div className="space-y-1"><p className="font-bold text-xs text-emerald-800">良かった点</p><p className="text-slate-700 whitespace-pre-wrap">{aiReview.positiveFeedback}</p></div>
+                      <div className="space-y-1"><p className="font-bold text-xs text-slate-800">文法・語法の解説</p><p className="text-slate-700 whitespace-pre-wrap">{aiReview.grammarExplanation}</p></div>
+                      <div className="space-y-1"><p className="font-bold text-xs text-slate-800">さらに自然な表現</p><p className="text-slate-700 whitespace-pre-wrap">{aiReview.naturalPhrasing}</p></div>
+                      <button type="button" disabled={phraseSaving || phraseSaved} onClick={() => void saveRevisedPhrase()}
+                        className="w-full flex items-center justify-center gap-2 rounded-xl bg-indigo-600 text-white font-bold text-xs py-2.5 disabled:bg-emerald-100 disabled:text-emerald-900">
+                        {phraseSaved ? <CheckCircle2 className="w-4 h-4" /> : <BookmarkPlus className="w-4 h-4" />}
+                        {phraseSaved ? 'フレーズ帳に保存済み' : phraseSaving ? '保存中…' : '修正版をフレーズ帳に保存'}
+                      </button>
+                    </div>
+                  )}
+                  <p className="text-[11px] text-slate-500">実行時のみ回答をGeminiへ送信します。無料枠と回数制限の対象です。AI添削結果そのものは履歴に残りません。必要な表現はフレーズ帳に保存してください。</p>
+                </div>
                 <p className="text-sm font-bold text-slate-700">今回の自己評価を選んで保存</p>
                 <div className="grid grid-cols-1 gap-2">
                   <button type="button" disabled={saving || saved} onClick={() => rateAndSave('perfect')}
@@ -368,8 +539,26 @@ export const QuickResponseView: FC<Props> = ({ onShowToast }) => {
       <div className="rounded-2xl border border-blue-100 bg-blue-50 p-3 text-xs text-blue-800 space-y-2">
         <div className="flex gap-2 items-center font-bold"><RotateCcw className="w-4 h-4" />計測上の注意</div>
         <p>音声の場合は「最初の音声認識結果を受信した時刻」を計測します。マイクの起動時間、通信状況、認識処理に影響されるため、実際に話し始めるまでの正確な時間ではありません。</p>
-        <p>制限時間を超えても練習は継続できます。回答例は一例であり、文法の自動採点は行いません。</p>
+        <p>制限時間を超えても練習は継続できます。回答例は一例です。AI添削は任意で実行でき、時間や自己評価の記録とは独立しています。</p>
       </div>
+      {tokenModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="qr-token-title">
+          <form onSubmit={saveTokenAndReview} className="w-full max-w-sm rounded-2xl bg-white p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between gap-2">
+              <h2 id="qr-token-title" className="font-bold text-slate-900">AI添削アクセストークン</h2>
+              <button type="button" aria-label="閉じる" onClick={() => { setTokenModalOpen(false); setTokenInput(''); }} className="rounded-lg p-1 text-slate-600"><X className="w-5 h-5" /></button>
+            </div>
+            <p className="text-xs text-slate-600">瞬間英作文・AI英会話と同じAUTH_TOKENを入力してください。Gemini APIキーは入力しないでください。</p>
+            <input type="password" autoComplete="off" value={tokenInput} onChange={e => setTokenInput(e.target.value)}
+              placeholder="アクセストークン" aria-label="アクセストークン" required className="w-full rounded-xl border border-slate-300 p-3 text-sm" />
+            <label className="flex items-start gap-2 text-xs text-slate-700">
+              <input type="checkbox" checked={rememberToken} onChange={e => setRememberToken(e.target.checked)} className="mt-0.5" />
+              <span>次回以降も保存する（自分専用の端末のみ）</span>
+            </label>
+            <button type="submit" disabled={!tokenInput.trim()} className="w-full bg-indigo-600 text-white font-bold rounded-xl py-3 disabled:opacity-50">保存してAI添削する</button>
+          </form>
+        </div>
+      )}
     </div>
   );
 };
