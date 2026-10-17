@@ -3,6 +3,7 @@ import { ArrowRight, BookmarkPlus, Bot, CheckCircle2, Clock3, Headphones, Loader
 import { QUICK_RESPONSE_QUESTIONS, type QuickResponseCategory } from '../data/quickResponseQuestions';
 import { db } from '../services/db';
 import { getAiToken, requestAiReview, setAiToken } from '../services/ai';
+import { addAiCorrectionToReviews } from '../services/review';
 import { isSpeechRecognitionSupported, speakText, SpeechRecognizer, stopSpeaking } from '../services/speech';
 import type { AiReviewResult, QuickResponseAttempt, SelfRating } from '../types';
 
@@ -265,7 +266,19 @@ export const QuickResponseView: FC<Props> = ({ onShowToast }) => {
       if (generation !== aiGenerationRef.current) return;
       setAiReview(result);
       setPhraseSaved(false);
-      onShowToast('クイックレスポンスのAI添削が完了しました', 'success');
+      try {
+        const added = await addAiCorrectionToReviews({
+          sourceId: `quickresponse:${question.id}`,
+          prompt: `英語で質問に答えてください：${question.english}`,
+          original: userEnglish,
+          corrected: result.revised,
+          needsReview: result.needsReview,
+        });
+        onShowToast(added ? 'AIが指摘した誤りを翌日からの復習に登録しました' : 'クイックレスポンスのAI添削が完了しました', 'success');
+      } catch (saveError) {
+        console.error('Could not save AI review card', saveError);
+        onShowToast('AI添削は完了しましたが復習への登録に失敗しました', 'error');
+      }
     } catch (error: unknown) {
       if (generation !== aiGenerationRef.current) return;
       const message = error instanceof Error ? error.message : 'AI添削に失敗しました。';

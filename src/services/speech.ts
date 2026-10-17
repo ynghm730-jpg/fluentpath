@@ -58,6 +58,92 @@ export function stopSpeaking(): void {
   }
 }
 
+/** Spoken sentence queue for AI streaming replies.
+ * The stream callback supplies cumulative text. Speak only complete sentences,
+ * never restart or overlap utterances; flush the final fragment on completion.
+ * Browser Web Speech voices and their startup delay can vary by device.
+ */
+export class StreamingSpeechQueue {
+  private lastText = '';
+  private buffer = '';
+  private sentences: string[] = [];
+  private speaking = false;
+  private cancelled = false;
+  private generation = 0;
+  private rate: number;
+  constructor(rate = 0.9) {
+    this.rate = rate;
+    stopSpeaking();
+  }
+
+  public push(cumulativeText: string): void {
+    if (this.cancelled || !cumulativeText.startsWith(this.lastText)) return;
+    this.buffer += cumulativeText.slice(this.lastText.length);
+    this.lastText = cumulativeText;
+    this.extractCompleteSentences();
+  }
+
+  private extractCompleteSentences(): void {
+    // A sentence boundary is followed by whitespace. A decimal number like 3.1
+    // or a partially streamed token will not be spoken prematurely.
+    while (true) {
+      const match = /[.!?]["'’”]?\s+/.exec(this.buffer);
+      if (!match) break;
+      const boundary = match.index + match[0].length;
+      const sentence = this.buffer.slice(0, boundary).trim();
+      this.buffer = this.buffer.slice(boundary);
+      if (sentence) this.sentences.push(sentence);
+    }
+    this.playNext();
+  }
+
+  public finish(fullText: string): void {
+    if (this.cancelled) return;
+    this.push(fullText);
+    // All remaining text is safe to read once the stream is complete.
+    if (this.buffer.trim()) this.sentences.push(this.buffer.trim());
+    this.buffer = '';
+    this.playNext();
+  }
+
+  private playNext(): void {
+    if (this.cancelled || this.speaking || this.sentences.length === 0) return;
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    const next = this.sentences.shift()!;
+    this.speaking = true;
+    const generation = this.generation;
+    try {
+      const utterance = new SpeechSynthesisUtterance(next);
+      utterance.lang = 'en-US';
+      utterance.rate = this.rate;
+      const voices = cachedVoices.length ? cachedVoices : window.speechSynthesis.getVoices();
+      const preferred = voices.find(v => v.lang === 'en-US' && (v.name.includes('Natural') || v.name.includes('Google') || v.name.includes('Samantha') || v.default))
+        || voices.find(v => v.lang.startsWith('en'));
+      if (preferred) utterance.voice = preferred;
+      const done = () => {
+        if (this.cancelled || generation !== this.generation) return;
+        this.speaking = false;
+        this.playNext();
+      };
+      utterance.onend = done;
+      utterance.onerror = done;
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      this.speaking = false;
+      this.playNext();
+    }
+  }
+
+  public cancel(): void {
+    this.cancelled = true;
+    this.generation++;
+    this.sentences = [];
+    this.buffer = '';
+    this.speaking = false;
+    stopSpeaking();
+  }
+}
+
 // 音声認識（STT: Speech-to-Text）のインターフェース
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SpeechRecognitionType = any;

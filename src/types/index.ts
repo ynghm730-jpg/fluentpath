@@ -1,4 +1,4 @@
-export type PracticeType = 'quick' | 'repeat' | 'phrase';
+export type PracticeType = 'quick' | 'repeat' | 'phrase' | 'ai';
 
 export type SelfRating = 'perfect' | 'good' | 'hard';
 
@@ -65,6 +65,8 @@ export interface AiReviewResult {
   grammarExplanation: string;
   naturalPhrasing: string;
   positiveFeedback: string;
+  // True only if the learner made a meaningful grammar/meaning/usage error.
+  needsReview?: boolean;
 }
 
 export interface AiReviewRequest {
@@ -88,6 +90,7 @@ export interface ConversationCorrection {
   explanation: string;
   turnNumber?: number;
   goodPoint?: string;
+  needsReview?: boolean;
 }
 export interface ConversationFeedback {
   positive: string[];
@@ -113,7 +116,7 @@ export interface ConversationSession {
 // Phase 4: Spaced repetition is stored locally, separately from raw practice history.
 export interface ReviewCard {
   id: string; // `${type}:${promptId}`
-  type: 'quick' | 'repeat';
+  type: 'quick' | 'repeat' | 'ai';
   promptId: string;
   promptText: string;
   modelAnswer: string;

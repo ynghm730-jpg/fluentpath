@@ -92,3 +92,35 @@ export async function completeReview(card: ReviewCard, response: string, rating:
     await db.records.add(record);
   });
 }
+
+/** Save only mistakes expressly identified by Gemini, using the existing 1–365 day review cycle.
+ * A stylistic alternative must not automatically become a review card.
+ * IDs are deterministic: revisiting a past conversation cannot reset progress.
+ */
+export async function addAiCorrectionToReviews(input: {
+  sourceId: string;
+  prompt: string;
+  original: string;
+  corrected: string;
+  needsReview?: boolean;
+}): Promise<boolean> {
+  if (input.needsReview !== true) return false;
+  const prompt = input.prompt.trim().slice(0, 450);
+  const corrected = input.corrected.trim().slice(0, 450);
+  const original = input.original.trim().slice(0, 450);
+  if (!prompt || !corrected || !original || !input.sourceId || original === corrected) return false;
+  const id = `ai:${input.sourceId}`;
+  return db.transaction('rw', db.reviews, async () => {
+    if (await db.reviews.get(id)) return false;
+    const now = new Date();
+    const stamp = now.toISOString();
+    const card: ReviewCard = {
+      id, type: 'ai', promptId: input.sourceId,
+      promptText: prompt, modelAnswer: corrected, lastResponse: original,
+      stage: 0, reviewCount: 0, dueDate: daysLater(now, 1),
+      createdAt: stamp, updatedAt: stamp,
+    };
+    await db.reviews.add(card);
+    return true;
+  });
+}

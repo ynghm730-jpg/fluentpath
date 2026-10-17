@@ -20,6 +20,7 @@ export const ReviewView: FC<Props> = ({ onShowToast, onRecordSaved }) => {
   const [listening, setListening] = useState(false);
   const [error, setError] = useState('');
   const [completed, setCompleted] = useState(0);
+  const [aiCards, setAiCards] = useState<ReviewCard[]>([]);
   const recognizer = useRef<SpeechRecognizer | null>(null);
   const startedAt = useRef(Date.now());
   const current = due[0];
@@ -27,12 +28,13 @@ export const ReviewView: FC<Props> = ({ onShowToast, onRecordSaved }) => {
   const reload = async () => {
     const [items, count] = await Promise.all([getDueReviews(), db.reviews.count()]);
     setDue(items); setTotal(count);
+    setAiCards(await db.reviews.where('type').equals('ai').toArray());
   };
   useEffect(() => {
     let active = true;
     recognizer.current = new SpeechRecognizer();
-    Promise.all([getDueReviews(), db.reviews.count()]).then(([items, count]) => {
-      if (active) { setDue(items); setTotal(count); setLoading(false); }
+    Promise.all([getDueReviews(), db.reviews.count(), db.reviews.where('type').equals('ai').toArray()]).then(([items, count, cards]) => {
+      if (active) { setDue(items); setTotal(count); setAiCards(cards); setLoading(false); }
     }).catch(() => { if (active) { setError('復習データを読み込めませんでした。'); setLoading(false); } });
     return () => { active = false; recognizer.current?.stop(); stopSpeaking(); };
   }, []);
@@ -79,7 +81,7 @@ export const ReviewView: FC<Props> = ({ onShowToast, onRecordSaved }) => {
       <div className="rounded-3xl bg-gradient-to-br from-indigo-600 to-blue-700 p-5 text-white shadow-lg">
         <div className="flex items-center gap-2 text-blue-100 text-xs font-bold"><BookOpenCheck className="w-4 h-4"/> FluentPath · Review</div>
         <h2 className="text-xl font-extrabold mt-1">弱点の自動復習</h2>
-        <p className="mt-2 text-xs text-blue-100 leading-relaxed">以前「惜しい・要復習」と評価した問題を、間隔を空けて練習します。AI APIは使いません。</p>
+        <p className="mt-2 text-xs text-blue-100 leading-relaxed">自己評価で苦手だった問題と、AI添削で指摘された誤りを間隔を空けて練習します。復習時にGemini APIは使いません。</p>
         <div className="grid grid-cols-3 gap-2 mt-4 text-center">
           <div className="rounded-xl bg-white/15 p-2"><div className="text-xl font-extrabold">{due.length}</div><div className="text-[10px]">今日の残り</div></div>
           <div className="rounded-xl bg-white/15 p-2"><div className="text-xl font-extrabold">{completed}</div><div className="text-[10px]">今回の完了</div></div>
@@ -95,19 +97,19 @@ export const ReviewView: FC<Props> = ({ onShowToast, onRecordSaved }) => {
         <div className="rounded-2xl border border-slate-200 bg-white p-6 text-center space-y-3">
           <BookOpenCheck className="mx-auto w-12 h-12 text-emerald-500"/>
           <h3 className="font-bold text-slate-800">今日の復習は完了です</h3>
-          <p className="text-xs text-slate-600 leading-relaxed">瞬間英作文またはリピート練習で「惜しい・要復習」を選択すると、原則翌日から復習リストに追加されます。</p>
+          <p className="text-xs text-slate-600 leading-relaxed">瞬間英作文・リピートで苦手だった問題と、AI添削で誤りが指摘された英文を翌日以降に復習します。</p>
           <p className="text-xs text-slate-500">次の出題日まで無理に追加練習する必要はありません。</p>
         </div>
       ) : (
         <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex justify-between items-center gap-2">
-            <span className="text-[11px] font-bold text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg">{current.type === 'quick' ? '瞬間英作文' : 'リピート'}</span>
+            <span className="text-[11px] font-bold text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg">{current.type === 'quick' ? '瞬間英作文' : current.type === 'ai' ? 'AI添削の復習' : 'リピート'}</span>
             <span className="flex items-center gap-1 text-xs text-slate-500"><Clock3 className="w-3.5 h-3.5"/> 復習 {current.reviewCount + 1}回目</span>
           </div>
 
-          {current.type === 'quick' ? (
+          {(current.type === 'quick' || current.type === 'ai') ? (
             <div className="space-y-2">
-              <p className="text-xs text-slate-500">次の日本語を英語で言ってください。</p>
+              <p className="text-xs text-slate-500">{current.type === 'ai' ? '次の質問・お題について、修正版の英文を思い出して答えてください。' : '次の日本語を英語で言ってください。'}</p>
               <p className="text-base font-bold text-slate-800 leading-relaxed">{current.promptText}</p>
             </div>
           ) : (
@@ -150,6 +152,20 @@ export const ReviewView: FC<Props> = ({ onShowToast, onRecordSaved }) => {
           )}
         </div>
       )}
+      {aiCards.length > 0 && <details className="bg-white border border-slate-200 rounded-xl p-3 text-xs space-y-2">
+        <summary className="cursor-pointer font-bold text-indigo-800">AI添削から登録された復習カード（{aiCards.length}件）を確認・削除</summary>
+        <p className="text-slate-500 my-2">復習は原則翌日から。AIによる誤り判定が不適切なカードは削除できます。</p>
+        {aiCards.map(card => <div key={card.id} className="border-t border-slate-100 py-2 space-y-1">
+          <p className="text-slate-700">{card.promptText}</p>
+          <p className="text-indigo-700">正しい表現：{card.modelAnswer}</p>
+          <p className="text-slate-500">次回：{card.dueDate}</p>
+          <button className="font-bold text-rose-600 underline" onClick={async () => {
+            if (!window.confirm('このAI添削の復習カードを削除しますか？')) return;
+            try { await db.reviews.delete(card.id); await reload(); onShowToast('復習カードを削除しました', 'info'); }
+            catch { onShowToast('削除できませんでした', 'error'); }
+          }}>このカードを削除</button>
+        </div>)}
+      </details>}
       <p className="text-[11px] text-slate-500 leading-relaxed px-1">復習間隔の目安：1 → 3 → 7 → 14 → 30 → 60 → 90 → 180 → 270 → 365日（最大1年）。評価が低い場合は短く、スムーズに言えた場合は長くします。記録はこの端末に保存されます。</p>
     </div>
   );

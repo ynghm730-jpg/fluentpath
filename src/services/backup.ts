@@ -52,7 +52,7 @@ function validPhrase(v: unknown): v is PhraseItem {
     && isNumber(v.reviewCount) && isString(v.createdAt);
 }
 function validRecord(v: unknown): v is StudyRecord {
-  return isObject(v) && ['quick', 'repeat', 'phrase'].includes(String(v.type))
+  return isObject(v) && ['quick', 'repeat', 'phrase', 'ai'].includes(String(v.type))
     && isString(v.promptId) && isString(v.promptText) && isString(v.userResponse)
     && isString(v.modelAnswer) && ['perfect', 'good', 'hard'].includes(String(v.selfRating))
     && isNumber(v.responseTimeMs) && isString(v.timestamp) && isString(v.date);
@@ -67,7 +67,7 @@ function validConversation(v: unknown): v is ConversationSession {
     && Array.isArray(v.turns) && v.turns.every(t => isObject(t) && ['assistant', 'user'].includes(String(t.role)) && isString(t.text));
 }
 function validReview(v: unknown): v is ReviewCard {
-  return isObject(v) && isString(v.id) && (v.type === 'quick' || v.type === 'repeat')
+  return isObject(v) && isString(v.id) && (v.type === 'quick' || v.type === 'repeat' || v.type === 'ai')
     && isString(v.promptId) && isString(v.promptText) && isString(v.modelAnswer)
     && isString(v.lastResponse) && isNumber(v.stage) && v.stage >= 0 && v.stage < REVIEW_INTERVAL_DAYS.length
     && Number.isInteger(v.stage) && isNumber(v.reviewCount)

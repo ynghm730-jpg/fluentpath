@@ -18,7 +18,7 @@ import type { QuickPrompt, SelfRating, StudyRecord, AiReviewResult } from '../ty
 import { INITIAL_PROMPTS } from '../data/initialPrompts';
 import { speakText, stopSpeaking, SpeechRecognizer, evaluateSimilarity } from '../services/speech';
 import { db } from '../services/db';
-import { saveStudyRecord, localDateKey } from '../services/review';
+import { saveStudyRecord, localDateKey, addAiCorrectionToReviews } from '../services/review';
 import { requestAiReview, getAiToken, setAiToken } from '../services/ai';
 
 interface QuickPromptViewProps {
@@ -264,6 +264,7 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
       return;
     }
 
+    const reviewPrompt = currentPrompt;
     setIsAiLoading(true);
     setAiError(null);
 
@@ -274,7 +275,19 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
         modelAnswer: currentPrompt.english,
       });
       setAiReview(result);
-      onShowToast('AI添削が完了しました！', 'success');
+      try {
+        const added = await addAiCorrectionToReviews({
+          sourceId: `quick:${reviewPrompt.id}`,
+          prompt: reviewPrompt.japanese,
+          original: answerText,
+          corrected: result.revised,
+          needsReview: result.needsReview,
+        });
+        onShowToast(added ? 'AI添削の誤りを翌日からの復習に登録しました' : 'AI添削が完了しました！', 'success');
+      } catch (saveError) {
+        console.error('Could not save AI review', saveError);
+        onShowToast('AI添削は完了しましたが復習への登録に失敗しました', 'error');
+      }
     } catch (err: any) {
       console.error('AI Review Error:', err);
       const errMsg = err.message || 'AI添削中にエラーが発生しました。';

@@ -3,8 +3,9 @@ import { BookMarked, CheckCircle2, KeyRound, LoaderCircle, Mic, MicOff, RotateCc
 import type { ConversationFeedback, ConversationLevel, ConversationMode, ConversationSession, ConversationTopic, ConversationTurn, MeetingScenarioId, SelfRating } from '../types';
 import { MEETING_SCENARIOS, MEETING_SCENARIO_IDS, getMeetingAnswer, getMeetingQuestion } from '../data/meetingScenarios';
 import { db } from '../services/db';
+import { addAiCorrectionToReviews } from '../services/review';
 import { getAiToken, requestConversationFeedback, requestConversationReplyStreaming, setAiToken } from '../services/ai';
-import { SpeechRecognizer, speakText, stopSpeaking } from '../services/speech';
+import { SpeechRecognizer, StreamingSpeechQueue, speakText, stopSpeaking } from '../services/speech';
 
 interface Props { onShowToast: (message: string, type?: 'success' | 'error' | 'info') => void; }
 interface Scenario { label: string; greeting: string; scripted: string[]; examples: string[]; }
@@ -64,6 +65,10 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
   const [finished, setFinished] = useState(false);
   const [feedback, setFeedback] = useState<ConversationFeedback | null>(null);
   const [savedCorrections, setSavedCorrections] = useState<number[]>([]);
+  const [earlySpeech, setEarlySpeech] = useState(() => {
+    try { return localStorage.getItem('fluentpath-early-speech') !== 'off'; } catch { return true; }
+  });
+  const streamingVoice = useRef<StreamingSpeechQueue | null>(null);
   const [sessionId, setSessionId] = useState('');
   const [startedAt, setStartedAt] = useState('');
   const [sessionCount, setSessionCount] = useState(0);
@@ -76,7 +81,7 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
     db.conversations.orderBy('startedAt').reverse().limit(5).toArray()
       .then(async rows => { setRecentSessions(rows); setSessionCount(await db.conversations.count()); })
       .catch(() => {});
-    return () => { recognizer.current?.stop(); stopSpeaking(); };
+    return () => { recognizer.current?.stop(); streamingVoice.current?.cancel(); stopSpeaking(); };
   }, []);
 
   const currentScenario = SCENARIOS[topic];
@@ -96,6 +101,7 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
     if (active && !finished && !window.confirm('現在の会話を終了して、新しく始めますか？（未終了の会話は保存されません）')) return;
     const first = isMeeting ? meetingScenario.opening[level] : SCENARIOS[topic].greeting;
     const nextId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    streamingVoice.current?.cancel(); streamingVoice.current = null;
     stopSpeaking();
     recognizer.current?.stop();
     setIsListening(false);
@@ -110,6 +116,7 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
 
   const changeMode = (next: ConversationMode) => {
     if (pending.current || (active && !finished)) return;
+    streamingVoice.current?.cancel(); streamingVoice.current = null;
     stopSpeaking(); recognizer.current?.stop(); setIsListening(false);
     setLatency(null);
     setActive(false); setFinished(false); setTurns([]); setDraft('');
@@ -119,9 +126,15 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
     if (next === 'meeting_script' || next === 'meeting_ai') setTopic('meeting');
   };
 
+  const replay = (text: string, rate = 0.9) => {
+    streamingVoice.current?.cancel(); streamingVoice.current = null;
+    speakText(text, rate);
+  };
+
   const toggleMic = () => {
     if (busy || finished) return;
     if (isListening) { recognizer.current?.stop(); setIsListening(false); return; }
+    streamingVoice.current?.cancel(); streamingVoice.current = null;
     stopSpeaking();
     const ok = recognizer.current?.start(
       (transcript) => setDraft(transcript),
@@ -139,12 +152,15 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
     if (replies >= maxTurns) return;
     if (usesAiReplies && !getAiToken()) { setIsTokenOpen(true); return; }
     pending.current = true; setBusy(true); setError(''); setLatency(null);
-    recognizer.current?.stop(); setIsListening(false); stopSpeaking();
+    recognizer.current?.stop(); setIsListening(false);
+    streamingVoice.current?.cancel(); streamingVoice.current = null; stopSpeaking();
     const userTurn: ConversationTurn = { role: 'user', text: message };
     const nextTurns = [...turns, userTurn];
     setDraft(''); setTurns(nextTurns);
     try {
       let reply: string;
+      const queue = usesAiReplies && earlySpeech ? new StreamingSpeechQueue(level === 'B1' ? 0.88 : 0.96) : null;
+      streamingVoice.current = queue;
       if (mode === 'meeting_script') {
         reply = getMeetingQuestion(meetingScenarioId, level, replies);
       } else if (mode === 'script') {
@@ -157,18 +173,46 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
             firstMs = performance.now() - started;
             setLatency({ firstMs });
           }
+          queue?.push(partial);
           setTurns([...nextTurns, { role: 'assistant', text: partial }]);
         });
         setLatency({ firstMs: firstMs ?? performance.now() - started, totalMs: performance.now() - started });
       }
       setTurns([...nextTurns, { role: 'assistant', text: reply }]);
       setShowMeetingHint(false);
-      speakText(reply, level === 'B1' ? 0.88 : 0.96);
+      if (queue) queue.finish(reply);
+      else speakText(reply, level === 'B1' ? 0.88 : 0.96);
     } catch (e) {
       // Restore draft/previous transcript so the user can retry without duplicated turns.
+      streamingVoice.current?.cancel(); streamingVoice.current = null;
       setTurns(turns); setDraft(message); setLatency(null);
       setError(e instanceof Error ? e.message : '応答できませんでした。少し時間をおいてください。');
     } finally { pending.current = false; setBusy(false); }
+  };
+
+  const autoSaveFeedbackMistakes = async (allTurns: ConversationTurn[], result: ConversationFeedback) => {
+    let count = 0;
+    // Marked mistakes only. A correct sentence with a stylistic alternative is ignored.
+    for (const correction of result.corrections) {
+      const number = correction.turnNumber;
+      if (correction.needsReview !== true || typeof number !== 'number' || !Number.isInteger(number)) continue;
+      const question = allTurns[(number - 1) * 2]?.text;
+      const answer = allTurns[(number - 1) * 2 + 1];
+      if (!question || answer?.role !== 'user') continue;
+      try {
+        if (await addAiCorrectionToReviews({
+          sourceId: `conversation:${sessionId}:${number}`,
+          prompt: `AIからの質問：${question}`,
+          original: answer.text,
+          corrected: correction.revised,
+          needsReview: correction.needsReview,
+        })) count++;
+      } catch (err) {
+        console.error('AI review card save failed', err);
+        onShowToast('添削は完了しましたが、一部の復習カードを保存できませんでした', 'error');
+      }
+    }
+    if (count > 0) onShowToast(`AIが指摘した誤り${count}件を翌日からの復習に登録しました`, 'success');
   };
 
   const saveSession = async (allTurns: ConversationTurn[], withFeedback?: ConversationFeedback) => {
@@ -185,7 +229,8 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
 
   const finish = async () => {
     if (!active || pending.current || replies === 0) return;
-    pending.current = true; setBusy(true); setError(''); stopSpeaking();
+    pending.current = true; setBusy(true); setError('');
+    streamingVoice.current?.cancel(); streamingVoice.current = null; stopSpeaking();
     recognizer.current?.stop(); setIsListening(false);
     setFinished(true);
     try { await saveSession(turns); }
@@ -195,6 +240,7 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
         const result = await requestConversationFeedback(isAdaptiveMeeting ? 'meeting' : topic, level, turns);
         setFeedback(result);
         await saveSession(turns, result);
+        await autoSaveFeedbackMistakes(turns, result);
       } catch (e) {
         setError(`会話は端末に保存しましたが、AIフィードバックは取得できませんでした：${e instanceof Error ? e.message : '通信エラー'}`);
       }
@@ -209,7 +255,7 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
     // 固定会議の全6回答を含めつつ、Workerの最大12発言制限を守る。
     // 最後のAIの質問・締めの発言だけは添削対象に不要。
     const feedbackTurns = mode === 'meeting_script' && turns[turns.length - 1]?.role === 'assistant' ? turns.slice(0, -1) : turns;
-    try { const result = await requestConversationFeedback(isMeeting ? 'meeting' : topic, level, feedbackTurns); setFeedback(result); await saveSession(turns, result); }
+    try { const result = await requestConversationFeedback(isMeeting ? 'meeting' : topic, level, feedbackTurns); setFeedback(result); await saveSession(turns, result); await autoSaveFeedbackMistakes(turns, result); }
     catch (e) { setError(e instanceof Error ? e.message : '再試行できませんでした。'); }
     finally { pending.current = false; setBusy(false); }
   };
@@ -226,6 +272,7 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
 
   const openPastSession = (item: ConversationSession) => {
     if (busy) return;
+    streamingVoice.current?.cancel(); streamingVoice.current = null;
     stopSpeaking(); recognizer.current?.stop(); setIsListening(false);
     setMode(item.mode); setTopic(item.topic); setLevel(item.level);
     setMeetingScenarioId(item.meetingScenarioId || 'progress');
@@ -306,11 +353,19 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
           <span>あなたの回答：{replies} / {maxTurns}</span>
         </div>
         <div className="bg-white border border-slate-200 rounded-2xl p-3 space-y-3" aria-live="polite">
+          {usesAiReplies && <label className="flex items-center gap-2 text-xs text-slate-600 rounded-lg bg-slate-50 border border-slate-100 px-3 py-2">
+            <input type="checkbox" checked={earlySpeech} disabled={busy} onChange={e => {
+              const enabled = e.target.checked;
+              setEarlySpeech(enabled);
+              try { localStorage.setItem('fluentpath-early-speech', enabled ? 'on' : 'off'); } catch { /* storage unavailable */ }
+            }} />
+            生成された最初の一文から読み上げる（端末によって差があります）
+          </label>}
           {turns.map((t, i) => <div key={`${i}-${t.role}`} className={`flex ${t.role === 'user' ? 'justify-end' : 'justify-start'}`}>
             <div className={`max-w-[91%] text-sm rounded-2xl p-3 leading-relaxed ${t.role === 'user' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-800'}`}>
               <div className={`text-[10px] font-bold mb-1 ${t.role === 'user' ? 'text-blue-100' : 'text-slate-500'}`}>{t.role === 'user' ? 'You' : mode === 'ai' ? 'AI partner' : isMeeting ? 'Meeting colleague' : 'Scenario'}</div>
               {t.text}
-              {t.role === 'assistant' && t.text && <button title="英文をもう一度読み上げ" aria-label="英文を読み上げ" className="block mt-2 text-blue-600" onClick={() => speakText(t.text, level === 'B1' ? 0.88 : 0.96)}><Volume2 className="w-4 h-4" /></button>}
+              {t.role === 'assistant' && t.text && <button title="英文をもう一度読み上げ" aria-label="英文を読み上げ" className="block mt-2 text-blue-600" onClick={() => replay(t.text, level === 'B1' ? 0.88 : 0.96)}><Volume2 className="w-4 h-4" /></button>}
             </div>
           </div>)}
           {busy && <div className="text-xs text-indigo-700 flex items-center gap-2"><LoaderCircle className="w-4 h-4 animate-spin"/> {finished ? 'フィードバックを作成中...' : latency ? '英文を受信中...' : 'AIの返答を待っています...'}</div>}
@@ -374,10 +429,11 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
                 {question && <p className="rounded-lg bg-white border border-slate-200 p-2"><strong>AIからの質問：</strong>{question}</p>}
                 <p><strong>元の文：</strong>{c.original}</p>
                 {c.goodPoint && <p className="text-emerald-800"><strong>良かった点：</strong>{c.goodPoint}</p>}
+                {c.needsReview === true && <p className="text-amber-700">復習対象：翌日から自動出題（初回保存時）</p>}
                 <p className="text-indigo-800"><strong>自然な言い換え：</strong>{c.revised}</p>
                 <p><strong>日本語訳：</strong>{c.japanese}</p>
                 <p><strong>解説：</strong>{c.explanation}</p>
-                <button className="mt-2 mr-4 text-blue-700 font-bold inline-flex items-center gap-1" onClick={() => speakText(c.revised, 0.9)}><Volume2 className="w-4 h-4" />修正版を読み上げ</button>
+                <button className="mt-2 mr-4 text-blue-700 font-bold inline-flex items-center gap-1" onClick={() => replay(c.revised, 0.9)}><Volume2 className="w-4 h-4" />修正版を読み上げ</button>
                 <button disabled={savedCorrections.includes(i)} className="mt-2 text-blue-700 font-bold inline-flex items-center gap-1 disabled:text-green-700" onClick={() => saveCorrection(i)}>{savedCorrections.includes(i) ? <CheckCircle2 className="w-4 h-4" /> : <BookMarked className="w-4 h-4" />} {savedCorrections.includes(i) ? '保存済み' : 'フレーズ帳に保存'}</button>
               </div>;
             })}

@@ -313,7 +313,7 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
                   >
                     <div className="space-y-0.5 max-w-[70%]">
                       <span className="text-[10px] font-bold text-blue-600 block">
-                        {r.type === 'quick' ? '瞬間英作文' : 'リピート'} · {r.date}
+                        {r.type === 'quick' ? '瞬間英作文' : r.type === 'ai' ? 'AI添削の復習' : 'リピート'} · {r.date}
                       </span>
                       <p className="text-slate-800 font-medium truncate">{r.promptText}</p>
                     </div>
@@ -367,7 +367,7 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
                 >
                   <div className="flex items-start justify-between gap-2">
                     <span className="text-[10px] font-bold text-rose-600 bg-rose-50 px-2 py-0.5 rounded-md">
-                      {r.type === 'quick' ? '瞬間英作文' : 'リピート'}
+                      {r.type === 'quick' ? '瞬間英作文' : r.type === 'ai' ? 'AI添削の復習' : 'リピート'}
                     </span>
                     <button
                       onClick={() => speakText(r.modelAnswer)}
