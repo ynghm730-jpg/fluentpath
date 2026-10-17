@@ -113,3 +113,24 @@ export interface ReviewCard {
   updatedAt: string;
   lastReviewedAt?: string;
 }
+
+
+// Phase 6A: Geminiを使わないクイックレスポンスの回答記録。
+// startLatencyMs は「問題表示→最初の文字入力/音声認識結果」までの参考値。
+// Web Speech APIの都合上、実際の発話開始時刻と一致するとは限りません。
+export interface QuickResponseAttempt {
+  id: string;
+  sessionId: string;
+  questionId: string;
+  category: 'business' | 'daily';
+  question: string;
+  answer: string;
+  inputMode: 'voice' | 'text' | 'none';
+  limitSeconds: 3 | 5 | 10;
+  startLatencyMs: number | null;
+  responseTimeMs: number;
+  withinLimit: boolean;
+  selfRating: SelfRating;
+  date: string;
+  timestamp: string;
+}

@@ -1,5 +1,5 @@
 import Dexie, { type Table } from 'dexie';
-import type { PhraseItem, StudyRecord, ConversationSession, ReviewCard } from '../types';
+import type { PhraseItem, StudyRecord, ConversationSession, ReviewCard, QuickResponseAttempt } from '../types';
 
 export interface AppSetting {
   key: string;
@@ -12,6 +12,7 @@ export class FluentPathDB extends Dexie {
   settings!: Table<AppSetting, string>;
   conversations!: Table<ConversationSession, string>;
   reviews!: Table<ReviewCard, string>;
+  quickResponses!: Table<QuickResponseAttempt, string>;
 
   constructor() {
     super('FluentPathDatabase');
@@ -61,6 +62,15 @@ export class FluentPathDB extends Dexie {
           };
         });
       if (cards.length) await tx.table('reviews').bulkPut(cards);
+    });
+    // Phase 6A: 新しい保存領域のみ追加。既存の学習記録は変更しない。
+    this.version(4).stores({
+      phrases: 'id, english, *tags, isBookmarked, createdAt, lastReviewedAt',
+      records: '++id, type, promptId, selfRating, date, timestamp',
+      settings: 'key',
+      conversations: 'id, date, startedAt, mode, topic',
+      reviews: 'id, dueDate, type, updatedAt',
+      quickResponses: 'id, sessionId, date, timestamp, category',
     });
   }
 }

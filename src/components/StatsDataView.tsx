@@ -145,17 +145,17 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
     setBackupBusy(true);
     try {
       const payload = await readBackupFile(file);
-      const { phrases, records, conversations, reviews } = payload.data;
+      const { phrases, records, conversations, reviews, quickResponses } = payload.data;
       const approved = window.confirm(
         `バックアップ日時：${payload.exportedAt}\n` +
-        `フレーズ${phrases.length}件、練習${records.length}件、英会話${conversations.length}件、復習${reviews.length}件\n\n` +
+        `フレーズ${phrases.length}件、練習${records.length}件、英会話${conversations.length}件、復習${reviews.length}件、即答${quickResponses.length}件\n\n` +
         '既存データは削除せず、重複を除いて追加・統合します。復元しますか？'
       );
       if (!approved) return;
       const added = await mergeBackup(payload);
       await loadData();
       onRefreshData();
-      onShowToast(`統合完了：フレーズ${added.phrases}・練習${added.records}・英会話${added.conversations}・復習${added.reviews}件を追加`, 'success');
+      onShowToast(`統合完了：フレーズ${added.phrases}・練習${added.records}・英会話${added.conversations}・復習${added.reviews}・即答${added.quickResponses}件を追加`, 'success');
     } catch (e) {
       onShowToast(`復元に失敗しました（元のデータは維持されます）：${e instanceof Error ? e.message : '不明なエラー'}`, 'error');
     } finally {

@@ -5,6 +5,7 @@ import { Header } from './components/Header';
 import { BottomNav } from './components/BottomNav';
 import { HomeView } from './components/HomeView';
 import { QuickPromptView } from './components/QuickPromptView';
+import { QuickResponseView } from './components/QuickResponseView';
 import { RepeatView } from './components/RepeatView';
 import { ConversationView } from './components/ConversationView';
 import { ReviewView } from './components/ReviewView';
@@ -16,6 +17,7 @@ import { calculateAnalytics } from './services/analytics';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<TabType>('home');
+  const [quickMode, setQuickMode] = useState<'composition' | 'response'>('composition');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [todayRecords, setTodayRecords] = useState<StudyRecord[]>([]);
   const [phraseCount, setPhraseCount] = useState<number>(0);
@@ -155,10 +157,23 @@ export function App() {
         )}
 
         {activeTab === 'quick' && (
-          <QuickPromptView
-            onShowToast={showToast}
-            onRecordSaved={refreshAppData}
-          />
+          <div className="space-y-4">
+            <div className="bg-white rounded-2xl p-1 border border-slate-200 grid grid-cols-2 gap-1" aria-label="学習モード切り替え">
+              <button type="button" onClick={() => setQuickMode('composition')}
+                className={`rounded-xl py-2 text-sm font-bold ${quickMode === 'composition' ? 'bg-blue-600 text-white' : 'text-slate-600'}`}>
+                瞬間英作文
+              </button>
+              <button type="button" onClick={() => setQuickMode('response')}
+                className={`rounded-xl py-2 text-sm font-bold ${quickMode === 'response' ? 'bg-indigo-600 text-white' : 'text-slate-600'}`}>
+                即答トレ
+              </button>
+            </div>
+            {quickMode === 'composition' ? (
+              <QuickPromptView onShowToast={showToast} onRecordSaved={refreshAppData} />
+            ) : (
+              <QuickResponseView onShowToast={showToast} />
+            )}
+          </div>
         )}
 
         {activeTab === 'repeat' && (

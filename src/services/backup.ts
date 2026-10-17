@@ -1,4 +1,4 @@
-import type { PhraseItem, StudyRecord, ConversationSession, ReviewCard } from '../types';
+import type { PhraseItem, StudyRecord, ConversationSession, ReviewCard, QuickResponseAttempt } from '../types';
 import { db } from './db';
 import { REVIEW_INTERVAL_DAYS } from './review';
 
@@ -18,17 +18,18 @@ export interface BackupPayload {
     records: StudyRecord[];
     conversations: ConversationSession[];
     reviews: ReviewCard[];
+    quickResponses: QuickResponseAttempt[];
   };
 }
 
 // Secrets intentionally excluded: IndexedDB settings and browser local/sessionStorage.
 export async function createBackup(): Promise<BackupPayload> {
-  const [phrases, records, conversations, reviews] = await Promise.all([
-    db.phrases.toArray(), db.records.toArray(), db.conversations.toArray(), db.reviews.toArray(),
+  const [phrases, records, conversations, reviews, quickResponses] = await Promise.all([
+    db.phrases.toArray(), db.records.toArray(), db.conversations.toArray(), db.reviews.toArray(), db.quickResponses.toArray(),
   ]);
   return {
     app: 'FluentPath', version: BACKUP_FORMAT_VERSION, exportedAt: new Date().toISOString(),
-    data: { phrases, records, conversations, reviews },
+    data: { phrases, records, conversations, reviews, quickResponses },
   };
 }
 
@@ -70,6 +71,19 @@ function validReview(v: unknown): v is ReviewCard {
     && isString(v.createdAt) && isString(v.updatedAt);
 }
 
+function validQuickResponse(v: unknown): v is QuickResponseAttempt {
+  return isObject(v) && isString(v.id) && isString(v.sessionId) && isString(v.questionId)
+    && ['business', 'daily'].includes(String(v.category))
+    && isString(v.question) && isString(v.answer)
+    && ['voice', 'text', 'none'].includes(String(v.inputMode))
+    && (v.limitSeconds === 3 || v.limitSeconds === 5 || v.limitSeconds === 10)
+    && (v.startLatencyMs === null || (isNumber(v.startLatencyMs) && v.startLatencyMs >= 0))
+    && isNumber(v.responseTimeMs) && v.responseTimeMs >= 0
+    && typeof v.withinLimit === 'boolean'
+    && ['perfect', 'good', 'hard'].includes(String(v.selfRating))
+    && isString(v.date) && isString(v.timestamp);
+}
+
 export function parseBackup(text: string): BackupPayload {
   let parsed: unknown;
   try { parsed = JSON.parse(text); }
@@ -84,7 +98,19 @@ export function parseBackup(text: string): BackupPayload {
       || !d.conversations.every(validConversation) || !d.reviews.every(validReview)) {
     throw new Error('バックアップの項目が欠けているか、形式が正しくありません。');
   }
-  return parsed as unknown as BackupPayload;
+  // Phase 4/5の旧JSONにはquickResponsesがないので、空配列として読み込む。
+  if (d.quickResponses !== undefined &&
+      (!Array.isArray(d.quickResponses) || !d.quickResponses.every(validQuickResponse))) {
+    throw new Error('即答トレーニング履歴の形式が正しくありません。');
+  }
+  return {
+    app: 'FluentPath', version: 1, exportedAt: parsed.exportedAt,
+    data: {
+      phrases: d.phrases as PhraseItem[], records: d.records as StudyRecord[],
+      conversations: d.conversations as ConversationSession[], reviews: d.reviews as ReviewCard[],
+      quickResponses: (d.quickResponses ?? []) as QuickResponseAttempt[],
+    },
+  };
 }
 
 export async function readBackupFile(file: File): Promise<BackupPayload> {
@@ -92,24 +118,26 @@ export async function readBackupFile(file: File): Promise<BackupPayload> {
   return parseBackup(await file.text());
 }
 
-export interface RestoreCounts { phrases: number; records: number; conversations: number; reviews: number; }
+export interface RestoreCounts { phrases: number; records: number; conversations: number; reviews: number; quickResponses: number; }
 
 // Merge-only restore; never clears tables. Current device wins on the same IDs.
 // Study logs have auto-incremented IDs, so dedupe by content instead of ID.
 export async function mergeBackup(payload: BackupPayload): Promise<RestoreCounts> {
-  return db.transaction('rw', db.phrases, db.records, db.conversations, db.reviews, async () => {
-    const [existingPhrases, existingRecords, existingConversations, existingReviews] = await Promise.all([
-      db.phrases.toArray(), db.records.toArray(), db.conversations.toArray(), db.reviews.toArray(),
+  return db.transaction('rw', db.phrases, db.records, db.conversations, db.reviews, db.quickResponses, async () => {
+    const [existingPhrases, existingRecords, existingConversations, existingReviews, existingQuickResponses] = await Promise.all([
+      db.phrases.toArray(), db.records.toArray(), db.conversations.toArray(), db.reviews.toArray(), db.quickResponses.toArray(),
     ]);
     const knownPhrases = new Set(existingPhrases.map(p => p.id));
     const knownConversations = new Set(existingConversations.map(c => c.id));
     const knownReviews = new Set(existingReviews.map(r => r.id));
+    const knownQuickResponses = new Set(existingQuickResponses.map(r => r.id));
     const recordKey = (r: StudyRecord) => JSON.stringify([r.type, r.promptId, r.timestamp, r.userResponse, r.selfRating]);
     const knownRecords = new Set(existingRecords.map(recordKey));
 
     const phrases = payload.data.phrases.filter(p => !knownPhrases.has(p.id));
     const conversations = payload.data.conversations.filter(c => !knownConversations.has(c.id));
     const reviews = payload.data.reviews.filter(r => !knownReviews.has(r.id));
+    const quickResponses = payload.data.quickResponses.filter(r => !knownQuickResponses.has(r.id));
     const records: StudyRecord[] = [];
     for (const rec of payload.data.records) {
       const key = recordKey(rec);
@@ -123,6 +151,7 @@ export async function mergeBackup(payload: BackupPayload): Promise<RestoreCounts
     if (records.length) await db.records.bulkAdd(records);
     if (conversations.length) await db.conversations.bulkAdd(conversations);
     if (reviews.length) await db.reviews.bulkAdd(reviews);
-    return { phrases: phrases.length, records: records.length, conversations: conversations.length, reviews: reviews.length };
+    if (quickResponses.length) await db.quickResponses.bulkAdd(quickResponses);
+    return { phrases: phrases.length, records: records.length, conversations: conversations.length, reviews: reviews.length, quickResponses: quickResponses.length };
   });
 }
