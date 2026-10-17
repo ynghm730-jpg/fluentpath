@@ -16,6 +16,7 @@ import { db, getWeakRecords } from '../services/db';
 import { speakText } from '../services/speech';
 import { downloadCSV } from '../utils/csv';
 import { createBackup, downloadBackup, readBackupFile, mergeBackup } from '../services/backup';
+import { fetchCloudSnapshots, uploadLocalSnapshot, localSyncDeviceId, getSyncDeviceName, setSyncDeviceName } from '../services/sync';
 
 interface StatsDataViewProps {
   onShowToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
@@ -37,6 +38,8 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
   const [activeTab, setActiveTab] = useState<'analysis' | 'stats' | 'weak' | 'settings'>('analysis');
   const backupFileRef = useRef<HTMLInputElement>(null);
   const [backupBusy, setBackupBusy] = useState(false);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncName, setSyncName] = useState(() => getSyncDeviceName());
 
   // データロード
   const loadData = async () => {
@@ -166,6 +169,46 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
       if (backupFileRef.current) backupFileRef.current.value = '';
       setBackupBusy(false);
     }
+  };
+
+  const handleCloudUpload = async () => {
+    if (syncBusy || backupBusy) return;
+    if (!window.confirm('この端末の学習履歴・会話内容・フレーズ・復習予定をCloudflare D1に保存します。\n\nデータは暗号化された通信で送信されますが、エンドツーエンド暗号化ではありません。よろしいですか？')) return;
+    setSyncBusy(true);
+    try {
+      setSyncDeviceName(syncName);
+      const at = await uploadLocalSnapshot();
+      onShowToast(`クラウドに保存しました（${new Date(at).toLocaleString('ja-JP')}）。`, 'success');
+    } catch (e) {
+      onShowToast(`クラウド保存に失敗：${e instanceof Error ? e.message : '不明なエラー'}`, 'error');
+    } finally { setSyncBusy(false); }
+  };
+
+  const handleCloudImport = async () => {
+    if (syncBusy || backupBusy) return;
+    setSyncBusy(true);
+    try {
+      const snapshots = (await fetchCloudSnapshots()).filter(s => s.deviceId !== localSyncDeviceId());
+      if (!snapshots.length) {
+        onShowToast('他端末のバックアップがありません。先に他端末で「クラウドへ保存」を押してください。', 'info');
+        return;
+      }
+      const description = snapshots.map(s =>
+        `${s.deviceName}（${new Date(s.updatedAt).toLocaleString('ja-JP')}）：学習${s.snapshot.data.records.length}件、会話${s.snapshot.data.conversations.length}件、復習${s.snapshot.data.reviews.length}件`
+      ).join('\n');
+      if (!window.confirm(`次の端末の学習データを取り込みます。\n\n${description}\n\n既存のデータは削除しません。復習予定は更新日時が新しい方を優先します。\n同じIDのフレーズ編集・削除は同期されません。続けますか？`)) return;
+      let added = 0; let updated = 0;
+      for (const item of snapshots) {
+        const result = await mergeBackup(item.snapshot, { mergeNewerReviews: true });
+        added += result.phrases + result.records + result.conversations + result.reviews + result.quickResponses;
+        updated += result.reviewUpdates;
+      }
+      await loadData();
+      onRefreshData();
+      onShowToast(`端末間の統合完了：新規${added}件・復習予定更新${updated}件。必要なら「クラウドへ保存」で反映してください。`, 'success');
+    } catch (e) {
+      onShowToast(`クラウド取込に失敗：${e instanceof Error ? e.message : '不明なエラー'}`, 'error');
+    } finally { setSyncBusy(false); }
   };
 
   // 履歴のリセット
@@ -422,12 +465,13 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
           <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-2 text-xs">
             <div className="flex items-center gap-2 text-blue-600 font-bold">
               <ShieldCheck className="w-5 h-5" />
-              <span>完全ローカル・プライバシー保証</span>
+              <span>学習データの保存先について</span>
             </div>
             <p className="text-slate-600 leading-relaxed">
               練習履歴とフレーズ帳は原則この端末に保存されます。AI添削・AI英会話モードの
               テキストはCloudflare Worker経由でGeminiに送信されます。音声入力はブラウザの
-              音声認識サービスを利用する場合があります。機密情報は入力しないでください。
+              音声認識サービスを利用する場合があります。下のクラウド保存を選ぶと、
+              会話内容と学習履歴がCloudflare D1にも保存されます。機密情報は入力しないでください。
             </p>
           </div>
 
@@ -448,6 +492,35 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
                 過去に端末に保存したAPIキーを削除する
               </button>
             )}
+          </div>
+
+          {/* Phase 7A: user-initiated cloud backup / merge; nothing uploads automatically. */}
+          <div className="bg-white p-4 rounded-2xl border border-indigo-200 shadow-sm space-y-3 text-xs">
+            <h3 className="font-bold text-slate-800">端末間の手動同期（Phase 7A）</h3>
+            <p className="text-[11px] text-slate-600 leading-relaxed">
+              MacBookとPixelの学習データをCloudflare D1経由で受け渡します。
+              自動送信はしません。通信はHTTPSですが、エンドツーエンド暗号化ではありません。
+              認証には保存済みAUTH_TOKENを使用し、トークン自体はクラウドのデータに含めません。
+            </p>
+            <label className="block text-[11px] font-semibold text-slate-700" htmlFor="sync-device-name">この端末の名前</label>
+            <input id="sync-device-name" value={syncName} maxLength={40}
+              onChange={e => setSyncName(e.target.value)}
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" placeholder="MacBook / Pixel" />
+            <button disabled={syncBusy || backupBusy || !syncName.trim()} onClick={handleCloudUpload}
+              className="w-full py-3 px-3 bg-indigo-600 text-white rounded-xl font-bold disabled:opacity-50">
+              ① この端末のデータをクラウドへ保存
+            </button>
+            <button disabled={syncBusy || backupBusy} onClick={handleCloudImport}
+              className="w-full py-3 px-3 bg-indigo-50 border border-indigo-200 text-indigo-700 rounded-xl font-bold disabled:opacity-50">
+              ② 他端末のデータを取り込む（確認して統合）
+            </button>
+            <p className="text-[11px] text-amber-800 leading-relaxed">
+              【重要】初回は両端末でJSONバックアップを保存してください。
+              削除した項目の削除状態や、同じIDのフレーズ編集内容はまだ同期できません。
+              他端末の古いデータが再び取り込まれることがあります。
+              まずMacで①→Pixelで②と①→Macで②の順に試してください。
+              1端末の保存上限は約1MB、最大4端末です。
+            </p>
           </div>
 
           {/* バックアップとデータ管理 */}

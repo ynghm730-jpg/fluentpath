@@ -122,18 +122,19 @@ export async function readBackupFile(file: File): Promise<BackupPayload> {
   return parseBackup(await file.text());
 }
 
-export interface RestoreCounts { phrases: number; records: number; conversations: number; reviews: number; quickResponses: number; }
+export interface RestoreCounts { phrases: number; records: number; conversations: number; reviews: number; quickResponses: number; reviewUpdates: number; }
 
 // Merge-only restore; never clears tables. Current device wins on the same IDs.
 // Study logs have auto-incremented IDs, so dedupe by content instead of ID.
-export async function mergeBackup(payload: BackupPayload): Promise<RestoreCounts> {
+export async function mergeBackup(payload: BackupPayload, options: { mergeNewerReviews?: boolean } = {}): Promise<RestoreCounts> {
   return db.transaction('rw', db.phrases, db.records, db.conversations, db.reviews, db.quickResponses, async () => {
     const [existingPhrases, existingRecords, existingConversations, existingReviews, existingQuickResponses] = await Promise.all([
       db.phrases.toArray(), db.records.toArray(), db.conversations.toArray(), db.reviews.toArray(), db.quickResponses.toArray(),
     ]);
     const knownPhrases = new Set(existingPhrases.map(p => p.id));
     const knownConversations = new Set(existingConversations.map(c => c.id));
-    const knownReviews = new Set(existingReviews.map(r => r.id));
+    const reviewById = new Map(existingReviews.map(r => [r.id, r]));
+    const knownReviews = new Set(reviewById.keys());
     const knownQuickResponses = new Set(existingQuickResponses.map(r => r.id));
     const recordKey = (r: StudyRecord) => JSON.stringify([r.type, r.promptId, r.timestamp, r.userResponse, r.selfRating]);
     const knownRecords = new Set(existingRecords.map(recordKey));
@@ -141,6 +142,15 @@ export async function mergeBackup(payload: BackupPayload): Promise<RestoreCounts
     const phrases = payload.data.phrases.filter(p => !knownPhrases.has(p.id));
     const conversations = payload.data.conversations.filter(c => !knownConversations.has(c.id));
     const reviews = payload.data.reviews.filter(r => !knownReviews.has(r.id));
+    // Only the cloud-sync flow opts into latest-updated review schedules.
+    // Legacy JSON restore keeps its original merge-only behavior.
+    const newerReviews = options.mergeNewerReviews
+      ? payload.data.reviews.filter(r => {
+          const current = reviewById.get(r.id);
+          return current && Number.isFinite(Date.parse(r.updatedAt)) &&
+            Date.parse(r.updatedAt) > Date.parse(current.updatedAt);
+        })
+      : [];
     const quickResponses = payload.data.quickResponses.filter(r => !knownQuickResponses.has(r.id));
     const records: StudyRecord[] = [];
     for (const rec of payload.data.records) {
@@ -155,7 +165,8 @@ export async function mergeBackup(payload: BackupPayload): Promise<RestoreCounts
     if (records.length) await db.records.bulkAdd(records);
     if (conversations.length) await db.conversations.bulkAdd(conversations);
     if (reviews.length) await db.reviews.bulkAdd(reviews);
+    if (newerReviews.length) await db.reviews.bulkPut(newerReviews);
     if (quickResponses.length) await db.quickResponses.bulkAdd(quickResponses);
-    return { phrases: phrases.length, records: records.length, conversations: conversations.length, reviews: reviews.length, quickResponses: quickResponses.length };
+    return { phrases: phrases.length, records: records.length, conversations: conversations.length, reviews: reviews.length, quickResponses: quickResponses.length, reviewUpdates: newerReviews.length };
   });
 }

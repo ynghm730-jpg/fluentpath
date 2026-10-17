@@ -7,7 +7,18 @@ interface RateLimiter {
   limit(options: { key: string }): Promise<{ success: boolean }>;
 }
 
+interface D1PreparedStatement {
+  bind(...values: (string | number | null)[]): D1PreparedStatement;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+  all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
+  run(): Promise<unknown>;
+}
+interface D1Database {
+  prepare(query: string): D1PreparedStatement;
+}
+
 export interface Env {
+  SYNC_DB?: D1Database;
   GEMINI_API_KEY?: string;
   AUTH_TOKEN?: string;
   DEFAULT_MODEL?: string;
@@ -68,9 +79,9 @@ async function authorized(request: Request, env: Env): Promise<boolean> {
   return difference === 0;
 }
 
-async function readLimitedJson(request: Request): Promise<unknown> {
+async function readLimitedJson(request: Request, maxBytes = MAX_REQUEST_BYTES): Promise<unknown> {
   const declaredLength = Number(request.headers.get('Content-Length') || 0);
-  if (declaredLength > MAX_REQUEST_BYTES) throw new Error('TOO_LARGE');
+  if (declaredLength > maxBytes) throw new Error('TOO_LARGE');
   if (!request.body) throw new Error('INVALID_JSON');
   const reader = request.body.getReader();
   const parts: Uint8Array[] = [];
@@ -80,7 +91,7 @@ async function readLimitedJson(request: Request): Promise<unknown> {
       const { done, value } = await reader.read();
       if (done) break;
       length += value.byteLength;
-      if (length > MAX_REQUEST_BYTES) {
+      if (length > maxBytes) {
         await reader.cancel();
         throw new Error('TOO_LARGE');
       }
@@ -358,6 +369,73 @@ async function handleConversationRequest(
   } catch { return failure('Geminiへの通信がタイムアウトしたか失敗しました。', 502, h, 'NETWORK_ERROR'); }
 }
 
+// Phase 7A: explicit, authenticated, manual snapshot exchange across personal devices.
+// The cloud retains one snapshot per registered browser, not a merged authoritative database.
+// Deletions and edits without updatedAt are intentionally not propagated by this MVP.
+const MAX_SYNC_JSON_BYTES = 1_000_000; // Less than D1's 2 MB maximum row value.
+const MAX_SYNC_REQUEST_BYTES = 1_100_000;
+const MAX_SYNC_DEVICES = 4;
+const SYNC_ID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const SYNC_DATA_KEYS = ['phrases', 'records', 'conversations', 'reviews', 'quickResponses'] as const;
+function isCloudBackup(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const backup = value as Record<string, unknown>;
+  if (backup.app !== 'FluentPath' || backup.version !== 1 || typeof backup.exportedAt !== 'string') return false;
+  if (!backup.data || typeof backup.data !== 'object' || Array.isArray(backup.data)) return false;
+  const data = backup.data as Record<string, unknown>;
+  return SYNC_DATA_KEYS.every(k => Array.isArray(data[k]));
+}
+function bodyBytes(text: string): number { return new TextEncoder().encode(text).byteLength; }
+
+async function handleSyncRequest(request: Request, env: Env, headers: Headers, pathname: string): Promise<Response> {
+  if (!(await authorized(request, env))) return failure('認証トークンが正しくありません。', 401, headers, 'UNAUTHORIZED');
+  if (!env.SYNC_DB) return failure('D1データベースが未設定です。', 503, headers, 'SYNC_DB_UNCONFIGURED');
+  const database = env.SYNC_DB;
+  try {
+    if (pathname === '/api/sync/snapshots' && request.method === 'GET') {
+      const { results } = await database.prepare(
+        'SELECT device_id, device_name, snapshot_json, updated_at FROM device_snapshots ORDER BY updated_at DESC LIMIT 4'
+      ).all<{ device_id: string; device_name: string; snapshot_json: string; updated_at: string }>();
+      const snapshots = results.map(r => ({
+        deviceId: r.device_id, deviceName: r.device_name, updatedAt: r.updated_at,
+        snapshot: JSON.parse(r.snapshot_json) as unknown,
+      }));
+      return asJson({ snapshots }, 200, headers);
+    }
+    if (pathname === '/api/sync/snapshot' && request.method === 'POST') {
+      let raw: unknown;
+      try { raw = await readLimitedJson(request, MAX_SYNC_REQUEST_BYTES); }
+      catch (err) {
+        const large = err instanceof Error && err.message === 'TOO_LARGE';
+        return failure(large ? '学習データが大きすぎます（上限約1MB）。' : 'JSON形式が不正です。', large ? 413 : 400, headers, large ? 'TOO_LARGE' : 'INVALID_JSON');
+      }
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return failure('データ形式が不正です。', 400, headers, 'INVALID_INPUT');
+      const input = raw as Record<string, unknown>;
+      if (typeof input.deviceId !== 'string' || !SYNC_ID_PATTERN.test(input.deviceId)
+        || typeof input.deviceName !== 'string' || !input.deviceName.trim() || input.deviceName.length > 40
+        || !isCloudBackup(input.snapshot)) return failure('端末またはバックアップの形式が不正です。', 400, headers, 'INVALID_INPUT');
+      const json = JSON.stringify(input.snapshot);
+      if (bodyBytes(json) > MAX_SYNC_JSON_BYTES) return failure('学習データが1MBを超えています。手動JSONバックアップをご利用ください。', 413, headers, 'TOO_LARGE');
+      const count = await database.prepare('SELECT COUNT(*) AS total FROM device_snapshots').first<{ total: number }>();
+      const registered = await database.prepare('SELECT device_id FROM device_snapshots WHERE device_id = ?').bind(input.deviceId).first();
+      if (!registered && (count?.total ?? 0) >= MAX_SYNC_DEVICES) {
+        return failure('登録済み端末が4件に達しています。', 409, headers, 'DEVICE_LIMIT');
+      }
+      const updatedAt = new Date().toISOString();
+      await database.prepare(`INSERT INTO device_snapshots (device_id, device_name, snapshot_json, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(device_id) DO UPDATE SET device_name=excluded.device_name,
+          snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at`)
+        .bind(input.deviceId, input.deviceName.trim(), json, updatedAt).run();
+      return asJson({ ok: true, deviceId: input.deviceId, updatedAt }, 200, headers);
+    }
+    return failure('この同期操作には対応していません。', 405, headers, 'METHOD_NOT_ALLOWED');
+  } catch (error) {
+    console.error('FluentPath sync database request failed:', error instanceof Error ? error.name : 'error');
+    return failure('同期データベースに接続できませんでした。設定や無料枠をご確認ください。', 503, headers, 'SYNC_DATABASE_ERROR');
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const h = corsHeaders(request);
@@ -382,6 +460,9 @@ export default {
         keyConfigured: Boolean(env.GEMINI_API_KEY),
         note: '認証成功です。Gemini本体の呼び出し成功を保証するものではありません。',
       }, 200, h);
+    }
+    if (pathname === '/api/sync/snapshots' || pathname === '/api/sync/snapshot') {
+      return handleSyncRequest(request, env, h, pathname);
     }
     if (pathname === '/api/conversation' || pathname === '/api/conversation/feedback' || pathname === '/api/conversation/stream') {
       return handleConversationRequest(request, env, h, pathname);

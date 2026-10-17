@@ -20,3 +20,7 @@ period = 60
 # Register these as Cloudflare Secrets, never in GitHub:
 # GEMINI_API_KEY
 # AUTH_TOKEN (>= 32 random characters)
+[[d1_databases]]
+binding = "SYNC_DB"
+database_name = "fluentpath-sync"
+database_id = "c6b6ea99-6b87-4b0a-bc45-a780b82f3c82"
