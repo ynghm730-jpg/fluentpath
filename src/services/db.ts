@@ -1,5 +1,6 @@
 import Dexie, { type Table } from 'dexie';
 import type { PhraseItem, StudyRecord, ConversationSession, ReviewCard, QuickResponseAttempt } from '../types';
+import type { SyncRevision, SyncConflict } from './syncSafety';
 
 export interface AppSetting {
   key: string;
@@ -13,6 +14,8 @@ export class FluentPathDB extends Dexie {
   conversations!: Table<ConversationSession, string>;
   reviews!: Table<ReviewCard, string>;
   quickResponses!: Table<QuickResponseAttempt, string>;
+  syncRevisions!: Table<SyncRevision, string>;
+  syncConflicts!: Table<SyncConflict, string>;
 
   constructor() {
     super('FluentPathDatabase');
@@ -71,6 +74,18 @@ export class FluentPathDB extends Dexie {
       conversations: 'id, date, startedAt, mode, topic',
       reviews: 'id, dueDate, type, updatedAt',
       quickResponses: 'id, sessionId, date, timestamp, category',
+    });
+    // Phase 7A-2: only add causal sync metadata and unresolved conflict stores.
+    // No migration changes or deletes existing learning records.
+    this.version(5).stores({
+      phrases: 'id, english, *tags, isBookmarked, createdAt, lastReviewedAt',
+      records: '++id, type, promptId, selfRating, date, timestamp',
+      settings: 'key',
+      conversations: 'id, date, startedAt, mode, topic',
+      reviews: 'id, dueDate, type, updatedAt',
+      quickResponses: 'id, sessionId, date, timestamp, category',
+      syncRevisions: 'key, entity, itemId, operation, changedAt',
+      syncConflicts: 'key, entity, itemId, remoteDeviceId',
     });
   }
 }

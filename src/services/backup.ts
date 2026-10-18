@@ -2,6 +2,7 @@ import type { PhraseItem, StudyRecord, ConversationSession, ReviewCard, QuickRes
 import { db } from './db';
 import { REVIEW_INTERVAL_DAYS } from './review';
 import { MEETING_SCENARIO_IDS } from '../data/meetingScenarios';
+import { captureLocalChanges, validSyncRevision, type SyncRevision, type SyncConflict } from './syncSafety';
 
 const BACKUP_FORMAT_VERSION = 1;
 const MAX_BACKUP_BYTES = 20 * 1024 * 1024;
@@ -20,17 +21,22 @@ export interface BackupPayload {
     conversations: ConversationSession[];
     reviews: ReviewCard[];
     quickResponses: QuickResponseAttempt[];
+    /** Version-1 JSON remains readable. These optional arrays began in Phase 7A-2. */
+    syncRevisions?: SyncRevision[];
+    syncConflicts?: SyncConflict[];
   };
 }
 
 // Secrets intentionally excluded: IndexedDB settings and browser local/sessionStorage.
 export async function createBackup(): Promise<BackupPayload> {
-  const [phrases, records, conversations, reviews, quickResponses] = await Promise.all([
+  await captureLocalChanges();
+  const [phrases, records, conversations, reviews, quickResponses, syncRevisions, syncConflicts] = await Promise.all([
     db.phrases.toArray(), db.records.toArray(), db.conversations.toArray(), db.reviews.toArray(), db.quickResponses.toArray(),
+    db.syncRevisions.toArray(), db.syncConflicts.toArray(),
   ]);
   return {
     app: 'FluentPath', version: BACKUP_FORMAT_VERSION, exportedAt: new Date().toISOString(),
-    data: { phrases, records, conversations, reviews, quickResponses },
+    data: { phrases, records, conversations, reviews, quickResponses, syncRevisions, syncConflicts },
   };
 }
 
@@ -107,12 +113,23 @@ export function parseBackup(text: string): BackupPayload {
       (!Array.isArray(d.quickResponses) || !d.quickResponses.every(validQuickResponse))) {
     throw new Error('即答トレーニング履歴の形式が正しくありません。');
   }
+  if (d.syncRevisions !== undefined && (!Array.isArray(d.syncRevisions) || !d.syncRevisions.every(validSyncRevision))) {
+    throw new Error('同期の変更履歴が不正です。');
+  }
+  if (d.syncConflicts !== undefined && (!Array.isArray(d.syncConflicts) || !d.syncConflicts.every(v =>
+    isObject(v) && isString(v.key) && isString(v.itemId) && isString(v.localRevision)
+    && isString(v.remoteDeviceId) && isString(v.remoteDeviceName)
+    && isString(v.detectedAt) && validSyncRevision(v.remote)
+    && (v.remoteValue === null || (v.entity === 'phrase' ? validPhrase(v.remoteValue) : validReview(v.remoteValue)))
+  ))) { throw new Error('競合の保存形式が不正です。'); }
   return {
     app: 'FluentPath', version: 1, exportedAt: parsed.exportedAt,
     data: {
       phrases: d.phrases as PhraseItem[], records: d.records as StudyRecord[],
       conversations: d.conversations as ConversationSession[], reviews: d.reviews as ReviewCard[],
       quickResponses: (d.quickResponses ?? []) as QuickResponseAttempt[],
+      syncRevisions: (d.syncRevisions ?? []) as SyncRevision[],
+      syncConflicts: (d.syncConflicts ?? []) as SyncConflict[],
     },
   };
 }

@@ -1,6 +1,9 @@
 /** Phase 7A: opt-in manual cloud snapshot exchange. No automatic upload. */
 import { createBackup, parseBackup, type BackupPayload } from './backup';
 import { getAiToken, getWorkerUrl } from './ai';
+import { mergeCloudEntities, type MergeSafetyStats } from './syncSafety';
+import { mergeBackup, type RestoreCounts } from './backup';
+import { db } from './db';
 
 const DEVICE_ID_KEY = 'fluentpath_sync_device_id';
 const DEVICE_NAME_KEY = 'fluentpath_sync_device_name';
@@ -44,7 +47,10 @@ async function requestSync(path: string, init: RequestInit = {}): Promise<unknow
   return payload;
 }
 export async function uploadLocalSnapshot(): Promise<string> {
+  if (await db.syncConflicts.count()) throw new Error('未解決の同期競合があります。設定画面で内容を確認・解決してから保存してください。');
   const snapshot = await createBackup();
+  // Unresolved conflicts stay in local JSON backups, not shared cloud snapshots.
+  snapshot.data.syncConflicts = [];
   const bytes = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
   if (bytes > MAX_SYNC_BYTES) throw new Error('学習データが1MBを超えています。現在の手動同期の上限です。JSONバックアップをご利用ください。');
   const deviceId = localSyncDeviceId();
@@ -66,4 +72,17 @@ export async function fetchCloudSnapshots(): Promise<CloudSnapshot[]> {
     const snapshot = parseBackup(JSON.stringify(row.snapshot));
     return { deviceId: row.deviceId, deviceName: row.deviceName, updatedAt: row.updatedAt, snapshot };
   });
+}
+
+/** Merge immutable history with the existing de-duplication algorithm;
+ * editable phrases and review schedules are merged causally with deletion tombstones.
+ */
+export async function importCloudSnapshot(snapshot: CloudSnapshot): Promise<{ history: RestoreCounts; safety: MergeSafetyStats }> {
+  const historyOnly: BackupPayload = {
+    ...snapshot.snapshot,
+    data: { ...snapshot.snapshot.data, phrases: [], reviews: [], syncRevisions: [], syncConflicts: [] },
+  };
+  const history = await mergeBackup(historyOnly);
+  const safety = await mergeCloudEntities(snapshot.snapshot.data, snapshot.deviceId, snapshot.deviceName);
+  return { history, safety };
 }

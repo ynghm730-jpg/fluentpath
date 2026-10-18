@@ -16,7 +16,8 @@ import { db, getWeakRecords } from '../services/db';
 import { speakText } from '../services/speech';
 import { downloadCSV } from '../utils/csv';
 import { createBackup, downloadBackup, readBackupFile, mergeBackup } from '../services/backup';
-import { fetchCloudSnapshots, uploadLocalSnapshot, localSyncDeviceId, getSyncDeviceName, setSyncDeviceName } from '../services/sync';
+import { fetchCloudSnapshots, uploadLocalSnapshot, importCloudSnapshot, localSyncDeviceId, getSyncDeviceName, setSyncDeviceName } from '../services/sync';
+import { resolveSyncConflict, type SyncConflict } from '../services/syncSafety';
 
 interface StatsDataViewProps {
   onShowToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
@@ -40,6 +41,7 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
   const [backupBusy, setBackupBusy] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncName, setSyncName] = useState(() => getSyncDeviceName());
+  const [syncConflicts, setSyncConflicts] = useState<SyncConflict[]>([]);
 
   // データロード
   const loadData = async () => {
@@ -57,6 +59,7 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
       setWeakRecords(weaks);
 
       setHasLegacyKey(Boolean(await db.settings.get('gemini_api_key')));
+      setSyncConflicts(await db.syncConflicts.toArray());
     } catch (err) {
       setLoadError(true);
       console.error('Failed to load stats:', err);
@@ -196,19 +199,46 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
       const description = snapshots.map(s =>
         `${s.deviceName}（${new Date(s.updatedAt).toLocaleString('ja-JP')}）：学習${s.snapshot.data.records.length}件、会話${s.snapshot.data.conversations.length}件、復習${s.snapshot.data.reviews.length}件`
       ).join('\n');
-      if (!window.confirm(`次の端末の学習データを取り込みます。\n\n${description}\n\n既存のデータは削除しません。復習予定は更新日時が新しい方を優先します。\n同じIDのフレーズ編集・削除は同期されません。続けますか？`)) return;
-      let added = 0; let updated = 0;
-      for (const item of snapshots) {
-        const result = await mergeBackup(item.snapshot, { mergeNewerReviews: true });
-        added += result.phrases + result.records + result.conversations + result.reviews + result.quickResponses;
-        updated += result.reviewUpdates;
+      if (!window.confirm(`次の端末の学習データを取り込みます。\n\n${description}\n\n相手端末で削除されたことが確実な項目は同期時に削除される場合があります。\n同じ項目の競合する変更は上書きせず、下に表示して選択できます。\n念のため両端末のJSONバックアップを保存してから続けてください。`)) return;
+      let added = 0; let updated = 0; let deleted = 0; let conflicts = 0;
+      // Import older snapshots first; causal revision metadata prevents stale resurrection.
+      for (const item of [...snapshots].sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))) {
+        const { history, safety } = await importCloudSnapshot(item);
+        added += history.records + history.conversations + history.quickResponses + safety.additions;
+        updated += safety.updates;
+        deleted += safety.deletions;
+        conflicts += safety.conflicts;
       }
       await loadData();
       onRefreshData();
-      onShowToast(`端末間の統合完了：新規${added}件・復習予定更新${updated}件。必要なら「クラウドへ保存」で反映してください。`, 'success');
+      onShowToast(`端末間の統合：追加${added}件・更新${updated}件・削除${deleted}件・要確認${conflicts}件。`, conflicts ? 'info' : 'success');
     } catch (e) {
       onShowToast(`クラウド取込に失敗：${e instanceof Error ? e.message : '不明なエラー'}`, 'error');
     } finally { setSyncBusy(false); }
+  };
+
+  const handleResolveCloudConflict = async (conflict: SyncConflict, decision: 'local' | 'remote') => {
+    if (syncBusy || backupBusy) return;
+    const source = decision === 'local' ? 'この端末' : conflict.remoteDeviceName;
+    const text = `${conflict.entity === 'phrase' ? 'フレーズ' : '復習カード'}「${conflict.itemId}」について、${source}の内容を採用します。\n\n` +
+      (decision === 'remote' && conflict.remote.operation === 'delete' ? 'この端末からも該当項目が削除されます。\n' : '') +
+      'もう一方の変更内容は画面上から消えます。JSONバックアップを保存したうえで続けてください。';
+    if (!window.confirm(text)) return;
+    setSyncBusy(true);
+    try {
+      await resolveSyncConflict(conflict.key, decision);
+      await loadData(); onRefreshData();
+      onShowToast('競合を解決しました。もう一度クラウドへ保存してください。', 'success');
+    } catch (e) {
+      onShowToast(`競合を解決できません：${e instanceof Error ? e.message : '不明なエラー'}`, 'error');
+    } finally { setSyncBusy(false); }
+  };
+
+  const describeSyncItem = (item: SyncConflict['remoteValue']): string => {
+    if (!item) return '削除済み';
+    return 'english' in item
+      ? `${item.english} / ${item.japanese} / タグ：${item.tags.join('・')} / メモ：${item.notes || 'なし'} / お気に入り：${item.isBookmarked ? 'あり' : 'なし'} / 復習回数：${item.reviewCount}`
+      : `${item.promptText} / 正解：${item.modelAnswer} / 次回復習 ${item.dueDate} / 段階 ${item.stage} / 復習回数 ${item.reviewCount}`;
   };
 
   // 履歴のリセット
@@ -496,7 +526,7 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
 
           {/* Phase 7A: user-initiated cloud backup / merge; nothing uploads automatically. */}
           <div className="bg-white p-4 rounded-2xl border border-indigo-200 shadow-sm space-y-3 text-xs">
-            <h3 className="font-bold text-slate-800">端末間の手動同期（Phase 7A）</h3>
+            <h3 className="font-bold text-slate-800">端末間の安全な手動同期（Phase 7A-2）</h3>
             <p className="text-[11px] text-slate-600 leading-relaxed">
               MacBookとPixelの学習データをCloudflare D1経由で受け渡します。
               自動送信はしません。通信はHTTPSですが、エンドツーエンド暗号化ではありません。
@@ -516,12 +546,31 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
             </button>
             <p className="text-[11px] text-amber-800 leading-relaxed">
               【重要】初回は両端末でJSONバックアップを保存してください。
-              削除した項目の削除状態や、同じIDのフレーズ編集内容はまだ同期できません。
-              他端末の古いデータが再び取り込まれることがあります。
-              まずMacで①→Pixelで②と①→Macで②の順に試してください。
+              今回の更新後に記録されたフレーズ・復習カードの削除は他端末にも伝わります。
+              同時編集や削除との競合は自動上書きせず下で確認してください。
+              更新前に既に削除された項目は復元できない場合があります。
+              まず両端末を更新し、各端末で①→②の順に実行してください。
               1端末の保存上限は約1MB、最大4端末です。
             </p>
           </div>
+
+          {syncConflicts.length > 0 && (
+            <div className="bg-amber-50 border border-amber-300 p-4 rounded-2xl space-y-3 text-xs">
+              <h3 className="font-bold text-amber-900">同期競合：{syncConflicts.length}件（要確認）</h3>
+              <p className="text-amber-900 leading-relaxed">どちらの変更も勝手には破棄していません。先にJSONバックアップを保存し、各項目を比較して採用する側を選んでください。解決までクラウドへの保存はできません。</p>
+              {syncConflicts.map(c => <div key={c.key} className="bg-white rounded-lg p-3 space-y-2 border border-amber-200">
+                <p className="font-bold">{c.entity === 'phrase' ? 'フレーズ' : '復習カード'}：{c.itemId}</p>
+                <p className="break-words">この端末：{describeSyncItem(c.localValue)}</p>
+                <p className="break-words">{c.remoteDeviceName}：{describeSyncItem(c.remoteValue)}</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <button disabled={syncBusy || backupBusy} onClick={() => handleResolveCloudConflict(c, 'local')}
+                    className="border border-indigo-300 bg-indigo-50 text-indigo-800 font-bold p-2 rounded-lg disabled:opacity-50">この端末を採用</button>
+                  <button disabled={syncBusy || backupBusy} onClick={() => handleResolveCloudConflict(c, 'remote')}
+                    className="border border-amber-400 bg-amber-100 text-amber-900 font-bold p-2 rounded-lg disabled:opacity-50">相手端末を採用</button>
+                </div>
+              </div>)}
+            </div>
+          )}
 
           {/* バックアップとデータ管理 */}
           <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-2.5 text-xs">
