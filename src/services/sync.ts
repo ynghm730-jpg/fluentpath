@@ -1,7 +1,7 @@
-/** Phase 7A: opt-in manual cloud snapshot exchange. No automatic upload. */
+/** Phase 7A-3: safe snapshot synchronization and conditional cloud writes. */
 import { createBackup, parseBackup, type BackupPayload } from './backup';
 import { getAiToken, getWorkerUrl } from './ai';
-import { mergeCloudEntities, type MergeSafetyStats } from './syncSafety';
+import { mergeCloudEntities, fingerprint, type MergeSafetyStats } from './syncSafety';
 import { mergeBackup, type RestoreCounts } from './backup';
 import { db } from './db';
 
@@ -46,20 +46,61 @@ async function requestSync(path: string, init: RequestInit = {}): Promise<unknow
   }
   return payload;
 }
-export async function uploadLocalSnapshot(): Promise<string> {
-  if (await db.syncConflicts.count()) throw new Error('未解決の同期競合があります。設定画面で内容を確認・解決してから保存してください。');
+export interface SyncCycleResult {
+  imported: number;
+  changes: number;
+  conflicts: number;
+  uploaded: boolean;
+  updatedAt?: string;
+}
+/**
+ * Full sync must read and merge all snapshots BEFORE publishing this device.
+ * All writes use a conditional version check enforced atomically by D1.
+ * Do not auto-publish unresolved conflict records.
+ */
+let inFlight: Promise<SyncCycleResult> | undefined;
+export function runSafeSyncCycle(): Promise<SyncCycleResult> {
+  if (inFlight) return inFlight;
+  const job = performSafeSyncCycle();
+  inFlight = job;
+  void job.finally(() => { if (inFlight === job) inFlight = undefined; }).catch(() => {});
+  return job;
+}
+async function performSafeSyncCycle(): Promise<SyncCycleResult> {
+  const snapshots = await fetchCloudSnapshots();
+  let changes = 0;
+  for (const item of [...snapshots].sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))) {
+    const merged = await importCloudSnapshot(item);
+    const h = merged.history;
+    const m = merged.safety;
+    changes += h.records + h.conversations + h.quickResponses + m.additions + m.updates + m.deletions;
+  }
+  const conflicts = await db.syncConflicts.count();
+  if (conflicts) return { imported: snapshots.length, changes, conflicts, uploaded: false };
   const snapshot = await createBackup();
-  // Unresolved conflicts stay in local JSON backups, not shared cloud snapshots.
   snapshot.data.syncConflicts = [];
   const bytes = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
-  if (bytes > MAX_SYNC_BYTES) throw new Error('学習データが1MBを超えています。現在の手動同期の上限です。JSONバックアップをご利用ください。');
+  if (bytes > MAX_SYNC_BYTES) throw new Error('学習データが1MBを超えています。自動同期を停止してJSONバックアップをご利用ください。');
   const deviceId = localSyncDeviceId();
   const deviceName = getSyncDeviceName();
+  const own = snapshots.find(row => row.deviceId === deviceId);
+  // Avoid cloud writes when the local payload has not changed; timestamps in
+  // the export envelope are excluded from the comparison.
+  if (own && own.deviceName === deviceName &&
+      fingerprint(own.snapshot.data) === fingerprint(snapshot.data)) {
+    return { imported: snapshots.length, changes, conflicts: 0, uploaded: false, updatedAt: own.updatedAt };
+  }
   const result = await requestSync('/api/sync/snapshot', {
     method: 'POST',
-    body: JSON.stringify({ deviceId, deviceName, snapshot }),
+    body: JSON.stringify({ deviceId, deviceName, snapshot, expectedUpdatedAt: own?.updatedAt ?? null }),
   }) as { updatedAt: string };
-  return result.updatedAt;
+  return { imported: snapshots.length, changes, conflicts: 0, uploaded: true, updatedAt: result.updatedAt };
+}
+/** Manual save now also reads/merges first to prevent stale overwrite. */
+export async function uploadLocalSnapshot(): Promise<string> {
+  const result = await runSafeSyncCycle();
+  if (result.conflicts) throw new Error(`同期競合が${result.conflicts}件あります。内容を確認・解決してから再度保存してください。`);
+  return result.updatedAt || new Date().toISOString();
 }
 export async function fetchCloudSnapshots(): Promise<CloudSnapshot[]> {
   const result = await requestSync('/api/sync/snapshots') as { snapshots?: unknown };

@@ -9,6 +9,7 @@ import type { AiReviewResult, QuickResponseAttempt, SelfRating } from '../types'
 
 interface Props {
   onShowToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+  onDataChanged?: () => void;
 }
 
 type CategoryFilter = 'all' | QuickResponseCategory;
@@ -30,7 +31,7 @@ function seconds(ms: number): string {
   return (ms / 1000).toFixed(1);
 }
 
-export const QuickResponseView: FC<Props> = ({ onShowToast }) => {
+export const QuickResponseView: FC<Props> = ({ onShowToast, onDataChanged }) => {
   const [category, setCategory] = useState<CategoryFilter>('all');
   const [limit, setLimit] = useState<Limit>(5);
   const [index, setIndex] = useState(0);
@@ -200,6 +201,7 @@ export const QuickResponseView: FC<Props> = ({ onShowToast }) => {
     };
     try {
       await db.quickResponses.put(item);
+      onDataChanged?.();
       setSaved(true);
       await loadHistory();
       onShowToast('即答トレーニングの結果を保存しました', 'success');

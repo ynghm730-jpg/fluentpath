@@ -18,6 +18,7 @@ import { downloadCSV } from '../utils/csv';
 import { createBackup, downloadBackup, readBackupFile, mergeBackup } from '../services/backup';
 import { fetchCloudSnapshots, uploadLocalSnapshot, importCloudSnapshot, localSyncDeviceId, getSyncDeviceName, setSyncDeviceName } from '../services/sync';
 import { resolveSyncConflict, type SyncConflict } from '../services/syncSafety';
+import { getAutoSyncEnabled, getAutoSyncStatus, setAutoSyncEnabled, runAutoSyncNow, beginManualSync, subscribeAutoSyncStatus, subscribeSyncDataChanges, type AutoSyncStatus } from '../services/autoSync';
 
 interface StatsDataViewProps {
   onShowToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
@@ -42,7 +43,8 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncName, setSyncName] = useState(() => getSyncDeviceName());
   const [syncConflicts, setSyncConflicts] = useState<SyncConflict[]>([]);
-
+  const [autoEnabled, setAutoEnabled] = useState(getAutoSyncEnabled);
+  const [autoStatus, setAutoStatus] = useState<AutoSyncStatus>(getAutoSyncStatus);
   // データロード
   const loadData = async () => {
     try {
@@ -68,6 +70,12 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
 
   useEffect(() => {
     loadData();
+  }, []);
+  useEffect(() => {
+    const unsubStatus = subscribeAutoSyncStatus(() => setAutoStatus({ ...getAutoSyncStatus() }));
+    const unsubData = subscribeSyncDataChanges(() => { void loadData(); onRefreshData(); });
+    return () => { unsubStatus(); unsubData(); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 統計値の計算
@@ -177,18 +185,21 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
   const handleCloudUpload = async () => {
     if (syncBusy || backupBusy) return;
     if (!window.confirm('この端末の学習履歴・会話内容・フレーズ・復習予定をCloudflare D1に保存します。\n\nデータは暗号化された通信で送信されますが、エンドツーエンド暗号化ではありません。よろしいですか？')) return;
+    const finishManual = beginManualSync();
     setSyncBusy(true);
     try {
       setSyncDeviceName(syncName);
       const at = await uploadLocalSnapshot();
+      await loadData(); onRefreshData();
       onShowToast(`クラウドに保存しました（${new Date(at).toLocaleString('ja-JP')}）。`, 'success');
     } catch (e) {
       onShowToast(`クラウド保存に失敗：${e instanceof Error ? e.message : '不明なエラー'}`, 'error');
-    } finally { setSyncBusy(false); }
+    } finally { finishManual();  await loadData(); setSyncBusy(false); }
   };
 
   const handleCloudImport = async () => {
     if (syncBusy || backupBusy) return;
+    const finishManual = beginManualSync();
     setSyncBusy(true);
     try {
       const snapshots = (await fetchCloudSnapshots()).filter(s => s.deviceId !== localSyncDeviceId());
@@ -214,7 +225,7 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
       onShowToast(`端末間の統合：追加${added}件・更新${updated}件・削除${deleted}件・要確認${conflicts}件。`, conflicts ? 'info' : 'success');
     } catch (e) {
       onShowToast(`クラウド取込に失敗：${e instanceof Error ? e.message : '不明なエラー'}`, 'error');
-    } finally { setSyncBusy(false); }
+    } finally { finishManual();  setSyncBusy(false); }
   };
 
   const handleResolveCloudConflict = async (conflict: SyncConflict, decision: 'local' | 'remote') => {
@@ -224,6 +235,7 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
       (decision === 'remote' && conflict.remote.operation === 'delete' ? 'この端末からも該当項目が削除されます。\n' : '') +
       'もう一方の変更内容は画面上から消えます。JSONバックアップを保存したうえで続けてください。';
     if (!window.confirm(text)) return;
+    const finishManual = beginManualSync();
     setSyncBusy(true);
     try {
       await resolveSyncConflict(conflict.key, decision);
@@ -231,7 +243,7 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
       onShowToast('競合を解決しました。もう一度クラウドへ保存してください。', 'success');
     } catch (e) {
       onShowToast(`競合を解決できません：${e instanceof Error ? e.message : '不明なエラー'}`, 'error');
-    } finally { setSyncBusy(false); }
+    } finally { finishManual();  setSyncBusy(false); }
   };
 
   const describeSyncItem = (item: SyncConflict['remoteValue']): string => {
@@ -524,32 +536,57 @@ export const StatsDataView: FC<StatsDataViewProps> = ({
             )}
           </div>
 
-          {/* Phase 7A: user-initiated cloud backup / merge; nothing uploads automatically. */}
+          {/* Phase 7A-3: safe manual sync retained; optional auto sync below. */}
           <div className="bg-white p-4 rounded-2xl border border-indigo-200 shadow-sm space-y-3 text-xs">
-            <h3 className="font-bold text-slate-800">端末間の安全な手動同期（Phase 7A-2）</h3>
+            <h3 className="font-bold text-slate-800">端末間の安全な同期（Phase 7A-3）</h3>
             <p className="text-[11px] text-slate-600 leading-relaxed">
               MacBookとPixelの学習データをCloudflare D1経由で受け渡します。
-              自動送信はしません。通信はHTTPSですが、エンドツーエンド暗号化ではありません。
+              自動同期は初期状態OFFで、この端末で明示的にONにした場合のみ動作します。通信はHTTPSですが、エンドツーエンド暗号化ではありません。
               認証には保存済みAUTH_TOKENを使用し、トークン自体はクラウドのデータに含めません。
             </p>
             <label className="block text-[11px] font-semibold text-slate-700" htmlFor="sync-device-name">この端末の名前</label>
             <input id="sync-device-name" value={syncName} maxLength={40}
-              onChange={e => setSyncName(e.target.value)}
+              onChange={e => { setSyncName(e.target.value); setSyncDeviceName(e.target.value); }}
               className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" placeholder="MacBook / Pixel" />
-            <button disabled={syncBusy || backupBusy || !syncName.trim()} onClick={handleCloudUpload}
+            <button disabled={syncBusy || backupBusy || autoStatus.phase === 'syncing' || !syncName.trim()} onClick={handleCloudUpload}
               className="w-full py-3 px-3 bg-indigo-600 text-white rounded-xl font-bold disabled:opacity-50">
               ① この端末のデータをクラウドへ保存
             </button>
-            <button disabled={syncBusy || backupBusy} onClick={handleCloudImport}
+            <button disabled={syncBusy || backupBusy || autoStatus.phase === 'syncing'} onClick={handleCloudImport}
               className="w-full py-3 px-3 bg-indigo-50 border border-indigo-200 text-indigo-700 rounded-xl font-bold disabled:opacity-50">
               ② 他端末のデータを取り込む（確認して統合）
             </button>
+            <div className="border-t border-indigo-100 pt-3 space-y-2">
+              <label className="flex items-center justify-between gap-3 font-bold text-sm text-slate-800">
+                <span>自動同期（この端末のみ）</span>
+                <input type="checkbox" className="w-5 h-5 accent-indigo-600" checked={autoEnabled}
+                  onChange={e => {
+                    const enabled = e.target.checked;
+                    if (enabled && !window.confirm('両端末の最新JSONバックアップを保管していますか？\n自動同期すると学習履歴・会話内容がCloudflare D1へ送信されます。削除記録や復習予定も他端末に反映されます。\n競合は自動上書きせず停止します。')) return;
+                    setSyncDeviceName(syncName);
+                    setAutoSyncEnabled(enabled); setAutoEnabled(enabled);
+                  }} />
+              </label>
+              <p className="text-[11px] text-slate-600">
+                ONで起動時・アプリ復帰時・学習記録後（約20秒）・利用中は約5分ごとにチェックします。
+                オフラインでは端末に保存し、接続復帰後に再試行します。ブラウザを閉じている間は動きません。
+              </p>
+              <p role="status" aria-live="polite" className={`text-[11px] rounded-lg p-2 ${autoStatus.phase === 'attention' || autoStatus.phase === 'error' ? 'bg-amber-50 text-amber-900' : 'bg-indigo-50 text-slate-700'}`}>
+                状態：{autoStatus.message}
+                {autoStatus.lastSuccess && <span className="block mt-1">最終成功：{new Date(autoStatus.lastSuccess).toLocaleString('ja-JP')}</span>}
+              </p>
+              <button disabled={!autoEnabled || syncBusy || backupBusy || autoStatus.phase === 'syncing'}
+                onClick={() => void runAutoSyncNow(true)}
+                className="w-full py-2.5 px-3 border border-indigo-300 bg-white text-indigo-700 rounded-lg font-bold disabled:opacity-50">
+                今すぐ安全な同期を試す / 競合解決後に再開
+              </button>
+            </div>
             <p className="text-[11px] text-amber-800 leading-relaxed">
               【重要】初回は両端末でJSONバックアップを保存してください。
               今回の更新後に記録されたフレーズ・復習カードの削除は他端末にも伝わります。
               同時編集や削除との競合は自動上書きせず下で確認してください。
               更新前に既に削除された項目は復元できない場合があります。
-              まず両端末を更新し、各端末で①→②の順に実行してください。
+              先に両端末を更新し、手動同期が正常なことを確認してから自動同期をONにしてください。
               1端末の保存上限は約1MB、最大4端末です。
             </p>
           </div>

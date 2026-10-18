@@ -159,6 +159,14 @@ export async function mergeCloudEntities(data: CloudEntities, deviceId: string, 
       const current = await db.syncRevisions.get(key);
       const value = remoteValues.get(key);
       const conflictKey = `${key}:${deviceId}`;
+      // A previous unresolved conflict for this item must be resolved first.
+      // Otherwise importing yet another device can change the local revision
+      // and make the earlier conflict impossible to resolve.
+      const pending = await db.syncConflicts.where('itemId').equals(remote.itemId).toArray();
+      if (pending.some(c => c.entity === remote.entity)) {
+        stats.conflicts++;
+        continue;
+      }
       const applyRemote = async () => {
         if (remote.operation === 'delete') {
           if (await table.get(remote.itemId)) { await table.delete(remote.itemId); stats.deletions++; }

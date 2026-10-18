@@ -7,7 +7,7 @@ import { addAiCorrectionToReviews } from '../services/review';
 import { getAiToken, requestConversationFeedback, requestConversationReplyStreaming, setAiToken } from '../services/ai';
 import { SpeechRecognizer, StreamingSpeechQueue, speakText, stopSpeaking } from '../services/speech';
 
-interface Props { onShowToast: (message: string, type?: 'success' | 'error' | 'info') => void; }
+interface Props { onShowToast: (message: string, type?: 'success' | 'error' | 'info') => void; onDataChanged?: () => void; }
 interface Scenario { label: string; greeting: string; scripted: string[]; examples: string[]; }
 const SCENARIOS: Record<ConversationTopic, Scenario> = {
   cafe: {
@@ -44,7 +44,7 @@ const SCENARIOS: Record<ConversationTopic, Scenario> = {
 const topicKeys = Object.keys(SCENARIOS) as ConversationTopic[];
 const MAX_TURNS = 5;
 
-export const ConversationView: FC<Props> = ({ onShowToast }) => {
+export const ConversationView: FC<Props> = ({ onShowToast, onDataChanged }) => {
   const [mode, setMode] = useState<ConversationMode>('ai');
   const [level, setLevel] = useState<ConversationLevel>('B1');
   const [topic, setTopic] = useState<ConversationTopic>('cafe');
@@ -223,6 +223,7 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
       ...(withFeedback ? { feedback: withFeedback } : {}),
     };
     await db.conversations.put(record);
+    onDataChanged?.();
     setSessionCount(await db.conversations.count());
     setRecentSessions(await db.conversations.orderBy('startedAt').reverse().limit(5).toArray());
   };
@@ -264,6 +265,7 @@ export const ConversationView: FC<Props> = ({ onShowToast }) => {
     if (!isMeeting || !finished || !sessionId) return;
     try {
       await db.conversations.update(sessionId, { meetingSelfRating: rating });
+      onDataChanged?.();
       setMeetingSelfRating(rating);
       setRecentSessions(await db.conversations.orderBy('startedAt').reverse().limit(5).toArray());
       onShowToast('会議練習の自己評価を保存しました', 'success');

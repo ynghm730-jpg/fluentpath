@@ -414,6 +414,13 @@ async function handleSyncRequest(request: Request, env: Env, headers: Headers, p
       if (typeof input.deviceId !== 'string' || !SYNC_ID_PATTERN.test(input.deviceId)
         || typeof input.deviceName !== 'string' || !input.deviceName.trim() || input.deviceName.length > 40
         || !isCloudBackup(input.snapshot)) return failure('端末またはバックアップの形式が不正です。', 400, headers, 'INVALID_INPUT');
+      // Phase 7A-3: compare-and-swap protects an existing browser's snapshot from stale tabs.
+      // Reject legacy writers instead of allowing them to silently overwrite protected data.
+      if (!Object.prototype.hasOwnProperty.call(input, 'expectedUpdatedAt') ||
+          !(input.expectedUpdatedAt === null || (typeof input.expectedUpdatedAt === 'string' &&
+            input.expectedUpdatedAt.length <= 40 && !Number.isNaN(Date.parse(input.expectedUpdatedAt))))) {
+        return failure('自動同期に対応したFluentPathへ更新してください。', 409, headers, 'SYNC_CLIENT_OUTDATED');
+      }
       const json = JSON.stringify(input.snapshot);
       if (bodyBytes(json) > MAX_SYNC_JSON_BYTES) return failure('学習データが1MBを超えています。手動JSONバックアップをご利用ください。', 413, headers, 'TOO_LARGE');
       const count = await database.prepare('SELECT COUNT(*) AS total FROM device_snapshots').first<{ total: number }>();
@@ -421,12 +428,22 @@ async function handleSyncRequest(request: Request, env: Env, headers: Headers, p
       if (!registered && (count?.total ?? 0) >= MAX_SYNC_DEVICES) {
         return failure('登録済み端末が4件に達しています。', 409, headers, 'DEVICE_LIMIT');
       }
-      const updatedAt = new Date().toISOString();
-      await database.prepare(`INSERT INTO device_snapshots (device_id, device_name, snapshot_json, updated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(device_id) DO UPDATE SET device_name=excluded.device_name,
-          snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at`)
-        .bind(input.deviceId, input.deviceName.trim(), json, updatedAt).run();
+      // Use extra fractional digits so even same-millisecond writes get a new CAS version.
+      const updatedAt = new Date().toISOString().replace('Z', `${String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, '0')}Z`);
+      const expectedUpdatedAt = input.expectedUpdatedAt as string | null;
+      // Atomic, conditional upsert. The WHERE clause ensures an old tab cannot overwrite
+      // a newer snapshot from the same deviceId. `null` only permits initial insertion.
+      const outcome = await database.prepare(`INSERT INTO device_snapshots
+        (device_id, device_name, snapshot_json, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(device_id) DO UPDATE SET
+          device_name=excluded.device_name, snapshot_json=excluded.snapshot_json,
+          updated_at=excluded.updated_at
+        WHERE ? IS NOT NULL AND device_snapshots.updated_at = ?`)
+        .bind(input.deviceId, input.deviceName.trim(), json, updatedAt, expectedUpdatedAt, expectedUpdatedAt)
+        .run() as { meta?: { changes?: number } };
+      if (outcome.meta?.changes !== 1) {
+        return failure('クラウドの同じ端末のデータが更新されました。取り込み直してから再試行してください。', 409, headers, 'SYNC_VERSION_CONFLICT');
+      }
       return asJson({ ok: true, deviceId: input.deviceId, updatedAt }, 200, headers);
     }
     return failure('この同期操作には対応していません。', 405, headers, 'METHOD_NOT_ALLOWED');

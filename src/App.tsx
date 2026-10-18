@@ -14,6 +14,7 @@ import { StatsDataView } from './components/StatsDataView';
 import { Toast, type ToastMessage } from './components/Toast';
 import { db, getTodayRecords, getWeakRecords } from './services/db';
 import { calculateAnalytics } from './services/analytics';
+import { startAutoSync, queueAutoSync, subscribeSyncDataChanges } from './services/autoSync';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<TabType>('home');
@@ -60,6 +61,18 @@ export function App() {
       console.error('Failed to sync app data:', err);
     }
   }, []);
+
+  // Only foreground opt-in sync. Refresh dashboard counters when remote items arrive.
+  useEffect(() => {
+    const stop = startAutoSync();
+    const unsubscribe = subscribeSyncDataChanges(() => { void refreshAppData(); });
+    return () => { unsubscribe(); stop(); };
+  }, [refreshAppData]);
+
+  const learningChanged = useCallback(() => {
+    void refreshAppData();
+    queueAutoSync();
+  }, [refreshAppData]);
 
   // 初回起動時の初期化（初期フレーズのシード）
   useEffect(() => {
@@ -169,9 +182,9 @@ export function App() {
               </button>
             </div>
             {quickMode === 'composition' ? (
-              <QuickPromptView onShowToast={showToast} onRecordSaved={refreshAppData} />
+              <QuickPromptView onShowToast={showToast} onRecordSaved={learningChanged} />
             ) : (
-              <QuickResponseView onShowToast={showToast} />
+              <QuickResponseView onShowToast={showToast} onDataChanged={learningChanged} />
             )}
           </div>
         )}
@@ -179,22 +192,22 @@ export function App() {
         {activeTab === 'repeat' && (
           <RepeatView
             onShowToast={showToast}
-            onRecordSaved={refreshAppData}
+            onRecordSaved={learningChanged}
           />
         )}
 
         {activeTab === 'conversation' && (
-          <ConversationView onShowToast={showToast} />
+          <ConversationView onShowToast={showToast} onDataChanged={learningChanged} />
         )}
 
         {activeTab === 'review' && (
-          <ReviewView onShowToast={showToast} onRecordSaved={refreshAppData} />
+          <ReviewView onShowToast={showToast} onRecordSaved={learningChanged} />
         )}
 
         {activeTab === 'phrasebook' && (
           <PhrasebookView
             onShowToast={showToast}
-            onRefreshPhraseCount={refreshAppData}
+            onRefreshPhraseCount={learningChanged}
           />
         )}
 
