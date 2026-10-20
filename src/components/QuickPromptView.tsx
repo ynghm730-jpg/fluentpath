@@ -20,6 +20,7 @@ import { speakText, stopSpeaking, SpeechRecognizer, evaluateSimilarity } from '.
 import { db } from '../services/db';
 import { saveStudyRecord, localDateKey, addAiCorrectionToReviews } from '../services/review';
 import { requestAiReview, getAiToken, setAiToken } from '../services/ai';
+import { loadStudyIndex, rememberStudyQuestion, readStudyCategory, writeStudyCategory } from '../services/studyProgress';
 
 interface QuickPromptViewProps {
   onShowToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
@@ -32,7 +33,7 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
 }) => {
   const [prompts] = useState<QuickPrompt[]>(INITIAL_PROMPTS);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [categoryFilter, setCategoryFilter] = useState<'all' | 'business' | 'daily'>('all');
+  const [categoryFilter, setCategoryFilter] = useState<'all' | 'business' | 'daily'>(() => readStudyCategory('composition'));
 
   // タイマー設定（5秒, 10秒, なし）
   const [timerDuration, setTimerDuration] = useState<number>(5);
@@ -69,6 +70,34 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
   });
 
   const currentPrompt: QuickPrompt | undefined = filteredPrompts[currentIndex] || filteredPrompts[0];
+
+  // Restore the last position for each filter, falling back to completed study history.
+  useEffect(() => {
+    let alive = true;
+    setCurrentIndex(0);
+    void loadStudyIndex('composition', categoryFilter, filteredPrompts).then(i => { if (alive) setCurrentIndex(i); })
+      .catch(() => onShowToast('前回の問題番号を読み込めませんでした', 'error'));
+    return () => { alive = false; };
+    // Question bank is static; only category switching needs a reload.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [categoryFilter]);
+  const jumpTo = (next: number) => {
+    const item = filteredPrompts[next];
+    if (!item) return;
+    setCurrentIndex(next);
+    void rememberStudyQuestion('composition', categoryFilter, item.id).catch(() => onShowToast('問題番号を保存できませんでした', 'error'));
+  };
+  const changeCategory = (category: 'all' | 'business' | 'daily') => {
+    writeStudyCategory('composition', category);
+    setCategoryFilter(category);
+  };
+  const restartFromBeginning = () => {
+    if (!window.confirm('このカテゴリの問題を第1問からやり直しますか？（学習履歴・復習カードは削除されません）')) return;
+    jumpTo(0);
+    setUserSpeech(''); setTextInput(''); setHasRevealed(false); setSelectedRating(null); setAiReview(null);
+    setTimeLeft(timerDuration); setIsTimerRunning(timerDuration > 0); startTimeRef.current = Date.now();
+    onShowToast('第1問からやり直します（学習履歴は保持されます）', 'info');
+  };
 
   // 音声認識の初期化
   useEffect(() => {
@@ -204,6 +233,9 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
 
     try {
       await saveStudyRecord(record);
+      if (filteredPrompts.length > 0) {
+        void rememberStudyQuestion('composition', categoryFilter, filteredPrompts[(currentIndex + 1) % filteredPrompts.length].id).catch(console.error);
+      }
       onRecordSaved();
       onShowToast(
         rating === 'perfect' ? '🎉 素晴らしい即答です！' : rating === 'good' ? '👍 惜しい！次回は完璧に！' : '💪 復習リストに追加しました',
@@ -340,18 +372,15 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
 
   // 次の問題へ
   const handleNext = () => {
-    if (currentIndex < filteredPrompts.length - 1) {
-      setCurrentIndex((prev) => prev + 1);
-    } else {
-      setCurrentIndex(0);
-      onShowToast('最後の問題に到達しました。先頭に戻ります！', 'info');
-    }
+    const next = (currentIndex + 1) % filteredPrompts.length;
+    jumpTo(next);
+    if (next === 0) onShowToast('最後の問題に到達しました。先頭に戻ります！', 'info');
   };
 
   // 前の問題へ
   const handlePrev = () => {
     if (currentIndex > 0) {
-      setCurrentIndex((prev) => prev - 1);
+      jumpTo(currentIndex - 1);
     }
   };
 
@@ -367,12 +396,16 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
 
   return (
     <div className="space-y-4 pb-12 animate-in fade-in duration-300">
+      <div className="flex items-center justify-between gap-2 rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 text-xs">
+        <span className="text-blue-800">続きから：第{currentIndex + 1}問 / {filteredPrompts.length}問</span>
+        <button type="button" onClick={restartFromBeginning} className="font-bold text-blue-700 underline">最初からやり直す</button>
+      </div>
       {/* 上部コントロール：カテゴリ絞り込みとタイマー設定 */}
       <div className="flex items-center justify-between gap-2 flex-wrap text-xs">
         {/* カテゴリ */}
         <div className="flex items-center bg-slate-100 p-1 rounded-xl">
           <button
-            onClick={() => { setCategoryFilter('all'); setCurrentIndex(0); }}
+            onClick={() => changeCategory('all')}
             className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
               categoryFilter === 'all' ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-slate-600'
             }`}
@@ -380,7 +413,7 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
             すべて (30)
           </button>
           <button
-            onClick={() => { setCategoryFilter('business'); setCurrentIndex(0); }}
+            onClick={() => changeCategory('business')}
             className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
               categoryFilter === 'business' ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-slate-600'
             }`}
@@ -388,7 +421,7 @@ export const QuickPromptView: FC<QuickPromptViewProps> = ({
             仕事 (15)
           </button>
           <button
-            onClick={() => { setCategoryFilter('daily'); setCurrentIndex(0); }}
+            onClick={() => changeCategory('daily')}
             className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
               categoryFilter === 'daily' ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-slate-600'
             }`}

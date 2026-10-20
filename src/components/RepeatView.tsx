@@ -17,6 +17,7 @@ import { INITIAL_REPEAT_SENTENCES } from '../data/initialRepeatSentences';
 import { speakText, stopSpeaking, SpeechRecognizer, evaluateSimilarity } from '../services/speech';
 import { db } from '../services/db';
 import { saveStudyRecord, localDateKey } from '../services/review';
+import { loadStudyIndex, rememberStudyQuestion, readStudyCategory, writeStudyCategory } from '../services/studyProgress';
 
 interface RepeatViewProps {
   onShowToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
@@ -29,7 +30,7 @@ export const RepeatView: FC<RepeatViewProps> = ({
 }) => {
   const [sentences] = useState<RepeatSentence[]>(INITIAL_REPEAT_SENTENCES);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [categoryFilter, setCategoryFilter] = useState<'all' | 'business' | 'daily'>('all');
+  const [categoryFilter, setCategoryFilter] = useState<'all' | 'business' | 'daily'>(() => readStudyCategory('repeat'));
 
   // 再生設定
   const [speechRate, setSpeechRate] = useState<number>(1.0);
@@ -54,6 +55,31 @@ export const RepeatView: FC<RepeatViewProps> = ({
 
   const currentSentence: RepeatSentence | undefined =
     filteredSentences[currentIndex] || filteredSentences[0];
+
+  useEffect(() => {
+    let alive = true;
+    setCurrentIndex(0);
+    void loadStudyIndex('repeat', categoryFilter, filteredSentences).then(i => { if (alive) setCurrentIndex(i); })
+      .catch(() => onShowToast('前回の問題番号を読み込めませんでした', 'error'));
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [categoryFilter]);
+  const jumpTo = (next: number) => {
+    const sentence = filteredSentences[next];
+    if (!sentence) return;
+    setCurrentIndex(next);
+    void rememberStudyQuestion('repeat', categoryFilter, sentence.id).catch(() => onShowToast('問題番号を保存できませんでした', 'error'));
+  };
+  const changeCategory = (category: 'all' | 'business' | 'daily') => {
+    writeStudyCategory('repeat', category);
+    setCategoryFilter(category);
+  };
+  const restartFromBeginning = () => {
+    if (!window.confirm('このカテゴリを第1問からやり直しますか？（学習履歴・復習カードは残ります）')) return;
+    jumpTo(0);
+    setUserTranscript(''); setSelectedRating(null); setIsMasked(true); startTimeRef.current = Date.now();
+    onShowToast('第1問から再開します', 'info');
+  };
 
   useEffect(() => {
     recognizerRef.current = new SpeechRecognizer();
@@ -146,6 +172,9 @@ export const RepeatView: FC<RepeatViewProps> = ({
 
     try {
       await saveStudyRecord(record);
+      if (filteredSentences.length > 0) {
+        void rememberStudyQuestion('repeat', categoryFilter, filteredSentences[(currentIndex + 1) % filteredSentences.length].id).catch(console.error);
+      }
       onRecordSaved();
       onShowToast(
         rating === 'perfect'
@@ -194,17 +223,14 @@ export const RepeatView: FC<RepeatViewProps> = ({
 
   // 次・前へ
   const handleNext = () => {
-    if (currentIndex < filteredSentences.length - 1) {
-      setCurrentIndex((prev) => prev + 1);
-    } else {
-      setCurrentIndex(0);
-      onShowToast('全30問完了しました！先頭に戻ります', 'info');
-    }
+    const next = (currentIndex + 1) % filteredSentences.length;
+    jumpTo(next);
+    if (next === 0) onShowToast('全問完了しました！先頭に戻ります', 'info');
   };
 
   const handlePrev = () => {
     if (currentIndex > 0) {
-      setCurrentIndex((prev) => prev - 1);
+      jumpTo(currentIndex - 1);
     }
   };
 
@@ -219,12 +245,16 @@ export const RepeatView: FC<RepeatViewProps> = ({
 
   return (
     <div className="space-y-4 pb-12 animate-in fade-in duration-300">
+      <div className="flex items-center justify-between gap-2 rounded-xl border border-indigo-100 bg-indigo-50 px-3 py-2 text-xs">
+        <span className="text-indigo-800">続きから：第{currentIndex + 1}問 / {filteredSentences.length}問</span>
+        <button type="button" onClick={restartFromBeginning} className="font-bold text-indigo-700 underline">最初からやり直す</button>
+      </div>
       {/* 上部コントロール：カテゴリ＆速度調整 */}
       <div className="flex items-center justify-between gap-2 flex-wrap text-xs">
         {/* カテゴリ */}
         <div className="flex items-center bg-slate-100 p-1 rounded-xl">
           <button
-            onClick={() => { setCategoryFilter('all'); setCurrentIndex(0); }}
+            onClick={() => changeCategory('all')}
             className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
               categoryFilter === 'all' ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-slate-600'
             }`}
@@ -232,7 +262,7 @@ export const RepeatView: FC<RepeatViewProps> = ({
             すべて (30)
           </button>
           <button
-            onClick={() => { setCategoryFilter('business'); setCurrentIndex(0); }}
+            onClick={() => changeCategory('business')}
             className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
               categoryFilter === 'business' ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-slate-600'
             }`}
@@ -240,7 +270,7 @@ export const RepeatView: FC<RepeatViewProps> = ({
             仕事 (15)
           </button>
           <button
-            onClick={() => { setCategoryFilter('daily'); setCurrentIndex(0); }}
+            onClick={() => changeCategory('daily')}
             className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
               categoryFilter === 'daily' ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-slate-600'
             }`}

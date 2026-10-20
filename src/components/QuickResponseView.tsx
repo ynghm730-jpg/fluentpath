@@ -5,6 +5,7 @@ import { db } from '../services/db';
 import { getAiToken, requestAiReview, setAiToken } from '../services/ai';
 import { addAiCorrectionToReviews } from '../services/review';
 import { isSpeechRecognitionSupported, speakText, SpeechRecognizer, stopSpeaking } from '../services/speech';
+import { loadStudyIndex, rememberStudyQuestion, readStudyCategory, writeStudyCategory } from '../services/studyProgress';
 import type { AiReviewResult, QuickResponseAttempt, SelfRating } from '../types';
 
 interface Props {
@@ -32,7 +33,7 @@ function seconds(ms: number): string {
 }
 
 export const QuickResponseView: FC<Props> = ({ onShowToast, onDataChanged }) => {
-  const [category, setCategory] = useState<CategoryFilter>('all');
+  const [category, setCategory] = useState<CategoryFilter>(() => readStudyCategory('response'));
   const [limit, setLimit] = useState<Limit>(5);
   const [index, setIndex] = useState(0);
   const [phase, setPhase] = useState<Phase>('ready');
@@ -59,6 +60,19 @@ export const QuickResponseView: FC<Props> = ({ onShowToast, onDataChanged }) => 
     [category]
   );
   const question = questions[index % questions.length];
+  useEffect(() => {
+    let alive = true;
+    setIndex(0);
+    void loadStudyIndex('response', category, questions).then(i => { if (alive) setIndex(i); })
+      .catch(() => onShowToast('前回の問題番号を読み込めませんでした', 'error'));
+    return () => { alive = false; };
+  }, [category, questions, onShowToast]);
+  const restartFromBeginning = () => {
+    if (phase !== 'ready') { onShowToast('回答中はリセットできません。次の問題へ進んでから実行してください', 'info'); return; }
+    if (!window.confirm('このカテゴリを第1問からやり直しますか？（過去の練習履歴は消えません）')) return;
+    setIndex(0);
+    if (questions[0]) void rememberStudyQuestion('response', category, questions[0].id).catch(console.error);
+  };
   const canSpeak = isSpeechRecognitionSupported();
 
   const recognizerRef = useRef<SpeechRecognizer | null>(null);
@@ -201,6 +215,9 @@ export const QuickResponseView: FC<Props> = ({ onShowToast, onDataChanged }) => 
     };
     try {
       await db.quickResponses.put(item);
+      if (questions.length > 0) {
+        void rememberStudyQuestion('response', category, questions[(index + 1) % questions.length].id).catch(console.error);
+      }
       onDataChanged?.();
       setSaved(true);
       await loadHistory();
@@ -225,7 +242,9 @@ export const QuickResponseView: FC<Props> = ({ onShowToast, onDataChanged }) => 
     setPhraseSaving(false);
     phraseSaveInFlightRef.current = false;
     setTokenModalOpen(false);
-    setIndex(current => (current + 1) % questions.length);
+    const nextIndex = (index + 1) % questions.length;
+    setIndex(nextIndex);
+    void rememberStudyQuestion('response', category, questions[nextIndex].id).catch(console.error);
     setPhase('ready');
     setAnswer('');
     setElapsedMs(0);
@@ -339,6 +358,7 @@ export const QuickResponseView: FC<Props> = ({ onShowToast, onDataChanged }) => 
 
   const resetCategory = (nextCategory: CategoryFilter) => {
     if (phase !== 'ready') return;
+    writeStudyCategory('response', nextCategory);
     setCategory(nextCategory);
     setIndex(0);
   };
@@ -383,6 +403,10 @@ export const QuickResponseView: FC<Props> = ({ onShowToast, onDataChanged }) => 
         </div>
       </div>
 
+      <div className="flex items-center justify-between gap-2 rounded-xl border border-indigo-100 bg-indigo-50 px-3 py-2 text-xs">
+        <span className="text-indigo-800">続きから：第{index + 1}問 / {questions.length}問</span>
+        <button type="button" disabled={phase !== 'ready'} onClick={restartFromBeginning} className="font-bold text-indigo-700 underline disabled:opacity-40">最初からやり直す</button>
+      </div>
       <section className="rounded-2xl bg-white border border-slate-200 p-4 space-y-4">
         <div className="flex items-center justify-between text-xs text-slate-500">
           <span>{category === 'all' ? '全問題' : category === 'business' ? '仕事' : '日常'}：{index + 1} / {questions.length}</span>

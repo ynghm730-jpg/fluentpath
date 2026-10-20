@@ -24,6 +24,13 @@ export const ReviewView: FC<Props> = ({ onShowToast, onRecordSaved }) => {
   const recognizer = useRef<SpeechRecognizer | null>(null);
   const startedAt = useRef(Date.now());
   const current = due[0];
+  const reviewDraftKey = current ? `fluentpath-review-draft:${current.id}` : '';
+  const restartCurrent = () => {
+    if (!current || saving) return;
+    if (!window.confirm('現在の復習問題を最初からやり直しますか？（復習日・学習記録は変更しません）')) return;
+    setAnswer(''); setRevealed(false); startedAt.current = Date.now();
+    try { localStorage.removeItem(reviewDraftKey); } catch { /* private browsing */ }
+  };
 
   const reload = async () => {
     const [items, count] = await Promise.all([getDueReviews(), db.reviews.count()]);
@@ -41,17 +48,28 @@ export const ReviewView: FC<Props> = ({ onShowToast, onRecordSaved }) => {
 
   useEffect(() => {
     startedAt.current = Date.now();
-    setAnswer(''); setRevealed(false); setError(''); setListening(false);
+    let previous = '';
+    try { previous = current?.id ? (localStorage.getItem(`fluentpath-review-draft:${current.id}`) || '') : ''; } catch { /* ignore */ }
+    setAnswer(previous); setRevealed(false); setError(''); setListening(false);
     recognizer.current?.stop();
     stopSpeaking();
   }, [current?.id]);
+
+  const setAndSaveAnswer = (value: string) => {
+    setAnswer(value);
+    if (!reviewDraftKey) return;
+    try {
+      if (value) localStorage.setItem(reviewDraftKey, value.slice(0, 1500));
+      else localStorage.removeItem(reviewDraftKey);
+    } catch { /* private browsing */ }
+  };
 
   const toggleMic = () => {
     if (saving || !current) return;
     if (listening) { recognizer.current?.stop(); setListening(false); return; }
     stopSpeaking();
     const ok = recognizer.current?.start(
-      transcript => setAnswer(transcript),
+      transcript => setAndSaveAnswer(transcript),
       msg => { setListening(false); onShowToast(msg, 'error'); },
       () => setListening(false),
     );
@@ -67,6 +85,7 @@ export const ReviewView: FC<Props> = ({ onShowToast, onRecordSaved }) => {
     setSaving(true); setError('');
     try {
       await completeReview(current, answer.trim(), rating, Date.now() - startedAt.current);
+      try { localStorage.removeItem(reviewDraftKey); } catch { /* ignore */ }
       await reload();
       setCompleted(v => v + 1);
       onRecordSaved();
@@ -102,6 +121,10 @@ export const ReviewView: FC<Props> = ({ onShowToast, onRecordSaved }) => {
         </div>
       ) : (
         <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex items-center justify-between text-xs text-slate-500">
+            <span>未完了の復習はこの問題から再開されます</span>
+            <button type="button" className="font-bold underline text-indigo-700" onClick={restartCurrent}>この問題を最初から</button>
+          </div>
           <div className="flex justify-between items-center gap-2">
             <span className="text-[11px] font-bold text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg">{current.type === 'quick' ? '瞬間英作文' : current.type === 'ai' ? 'AI添削の復習' : 'リピート'}</span>
             <span className="flex items-center gap-1 text-xs text-slate-500"><Clock3 className="w-3.5 h-3.5"/> 復習 {current.reviewCount + 1}回目</span>
@@ -121,7 +144,7 @@ export const ReviewView: FC<Props> = ({ onShowToast, onRecordSaved }) => {
 
           <div className="space-y-2">
             <label htmlFor="review-answer" className="block text-xs font-bold text-slate-700">あなたの回答（任意・音声入力可）</label>
-            <textarea id="review-answer" rows={2} maxLength={1500} value={answer} onChange={e => setAnswer(e.target.value)} disabled={saving || revealed}
+            <textarea id="review-answer" rows={2} maxLength={1500} value={answer} onChange={e => setAndSaveAnswer(e.target.value)} disabled={saving || revealed}
               placeholder="ここに英語を入力するか、マイクで話してください"
               className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm focus:ring-2 focus:ring-indigo-200 focus:outline-none"/>
             <button onClick={toggleMic} disabled={saving || revealed} className={`w-full rounded-xl border py-2.5 text-sm font-bold flex justify-center gap-2 items-center disabled:opacity-50 ${listening ? 'border-rose-200 bg-rose-50 text-rose-600' : 'border-slate-200 text-slate-700'}`}>

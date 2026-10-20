@@ -3,6 +3,7 @@ import { db } from './db';
 import { REVIEW_INTERVAL_DAYS } from './review';
 import { MEETING_SCENARIO_IDS } from '../data/meetingScenarios';
 import { captureLocalChanges, validSyncRevision, type SyncRevision, type SyncConflict } from './syncSafety';
+import { listStudyCursors, mergeStudyCursors, validStudyCursor, type StudyCursor } from './studyProgress';
 
 const BACKUP_FORMAT_VERSION = 1;
 const MAX_BACKUP_BYTES = 20 * 1024 * 1024;
@@ -24,19 +25,21 @@ export interface BackupPayload {
     /** Version-1 JSON remains readable. These optional arrays began in Phase 7A-2. */
     syncRevisions?: SyncRevision[];
     syncConflicts?: SyncConflict[];
+    /** Only finite-question cursors; never arbitrary settings or secrets. */
+    studyProgress?: StudyCursor[];
   };
 }
 
 // Secrets intentionally excluded: IndexedDB settings and browser local/sessionStorage.
 export async function createBackup(): Promise<BackupPayload> {
   await captureLocalChanges();
-  const [phrases, records, conversations, reviews, quickResponses, syncRevisions, syncConflicts] = await Promise.all([
+  const [phrases, records, conversations, reviews, quickResponses, syncRevisions, syncConflicts, studyProgress] = await Promise.all([
     db.phrases.toArray(), db.records.toArray(), db.conversations.toArray(), db.reviews.toArray(), db.quickResponses.toArray(),
-    db.syncRevisions.toArray(), db.syncConflicts.toArray(),
+    db.syncRevisions.toArray(), db.syncConflicts.toArray(), listStudyCursors(),
   ]);
   return {
     app: 'FluentPath', version: BACKUP_FORMAT_VERSION, exportedAt: new Date().toISOString(),
-    data: { phrases, records, conversations, reviews, quickResponses, syncRevisions, syncConflicts },
+    data: { phrases, records, conversations, reviews, quickResponses, syncRevisions, syncConflicts, studyProgress },
   };
 }
 
@@ -122,6 +125,9 @@ export function parseBackup(text: string): BackupPayload {
     && isString(v.detectedAt) && validSyncRevision(v.remote)
     && (v.remoteValue === null || (v.entity === 'phrase' ? validPhrase(v.remoteValue) : validReview(v.remoteValue)))
   ))) { throw new Error('競合の保存形式が不正です。'); }
+  if (d.studyProgress !== undefined && (!Array.isArray(d.studyProgress) || !d.studyProgress.every(validStudyCursor))) {
+    throw new Error('問題の再開位置データの形式が正しくありません。');
+  }
   return {
     app: 'FluentPath', version: 1, exportedAt: parsed.exportedAt,
     data: {
@@ -130,6 +136,7 @@ export function parseBackup(text: string): BackupPayload {
       quickResponses: (d.quickResponses ?? []) as QuickResponseAttempt[],
       syncRevisions: (d.syncRevisions ?? []) as SyncRevision[],
       syncConflicts: (d.syncConflicts ?? []) as SyncConflict[],
+      studyProgress: (d.studyProgress ?? []) as StudyCursor[],
     },
   };
 }
@@ -144,7 +151,7 @@ export interface RestoreCounts { phrases: number; records: number; conversations
 // Merge-only restore; never clears tables. Current device wins on the same IDs.
 // Study logs have auto-incremented IDs, so dedupe by content instead of ID.
 export async function mergeBackup(payload: BackupPayload, options: { mergeNewerReviews?: boolean } = {}): Promise<RestoreCounts> {
-  return db.transaction('rw', db.phrases, db.records, db.conversations, db.reviews, db.quickResponses, async () => {
+  const results = await db.transaction('rw', db.phrases, db.records, db.conversations, db.reviews, db.quickResponses, async () => {
     const [existingPhrases, existingRecords, existingConversations, existingReviews, existingQuickResponses] = await Promise.all([
       db.phrases.toArray(), db.records.toArray(), db.conversations.toArray(), db.reviews.toArray(), db.quickResponses.toArray(),
     ]);
@@ -186,4 +193,6 @@ export async function mergeBackup(payload: BackupPayload, options: { mergeNewerR
     if (quickResponses.length) await db.quickResponses.bulkAdd(quickResponses);
     return { phrases: phrases.length, records: records.length, conversations: conversations.length, reviews: reviews.length, quickResponses: quickResponses.length, reviewUpdates: newerReviews.length };
   });
+  await mergeStudyCursors(payload.data.studyProgress ?? []);
+  return results;
 }

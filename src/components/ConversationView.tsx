@@ -43,6 +43,32 @@ const SCENARIOS: Record<ConversationTopic, Scenario> = {
 };
 const topicKeys = Object.keys(SCENARIOS) as ConversationTopic[];
 const MAX_TURNS = 5;
+// Unfinished conversations stay on THIS device. Completed conversations use existing DB/cloud sync.
+const PENDING_CONVERSATION_KEY = 'fluentpath-pending-conversation-v1';
+interface PendingConversation {
+  mode: ConversationMode; level: ConversationLevel; topic: ConversationTopic;
+  meetingScenarioId: MeetingScenarioId; sessionId: string; startedAt: string;
+  turns: ConversationTurn[]; draft: string;
+}
+function readPendingConversation(): PendingConversation | null {
+  try {
+    const raw = localStorage.getItem(PENDING_CONVERSATION_KEY);
+    if (!raw || raw.length > 24000) return null;
+    const v: unknown = JSON.parse(raw);
+    if (!v || typeof v !== 'object') return null;
+    const s = v as Partial<PendingConversation>;
+    if (!['ai', 'script', 'meeting_script', 'meeting_ai'].includes(String(s.mode))
+        || !['B1', 'B2'].includes(String(s.level))
+        || !['cafe', 'airport', 'hotel', 'meeting', 'intro', 'travel'].includes(String(s.topic))
+        || typeof s.meetingScenarioId !== 'string' || !(s.meetingScenarioId in MEETING_SCENARIOS)
+        || typeof s.sessionId !== 'string' || typeof s.startedAt !== 'string'
+        || !Array.isArray(s.turns) || s.turns.length < 1 || s.turns.length > 20
+        || !s.turns.every(t => t && (t.role === 'assistant' || t.role === 'user') && typeof t.text === 'string' && t.text.length <= 1500)) return null;
+    return { mode: s.mode!, level: s.level!, topic: s.topic!, meetingScenarioId: s.meetingScenarioId as MeetingScenarioId,
+      sessionId: s.sessionId, startedAt: s.startedAt, turns: s.turns, draft: typeof s.draft === 'string' ? s.draft.slice(0, 450) : '' };
+  } catch { return null; }
+}
+
 
 export const ConversationView: FC<Props> = ({ onShowToast, onDataChanged }) => {
   const [mode, setMode] = useState<ConversationMode>('ai');
@@ -83,6 +109,25 @@ export const ConversationView: FC<Props> = ({ onShowToast, onDataChanged }) => {
       .catch(() => {});
     return () => { recognizer.current?.stop(); streamingVoice.current?.cancel(); stopSpeaking(); };
   }, []);
+
+  // Restore an unfinished multi-turn conversation after tab switches or app restart.
+  useEffect(() => {
+    const pendingSession = readPendingConversation();
+    if (!pendingSession) return;
+    setMode(pendingSession.mode); setLevel(pendingSession.level); setTopic(pendingSession.topic);
+    setMeetingScenarioId(pendingSession.meetingScenarioId);
+    setSessionId(pendingSession.sessionId); setStartedAt(pendingSession.startedAt);
+    setTurns(pendingSession.turns); setDraft(pendingSession.draft);
+    setActive(true); setFinished(false); setFeedback(null);
+  }, []);
+  useEffect(() => {
+    try {
+      if (finished) return;
+      if (!active || busy || !turns.length) return;
+      const snapshot: PendingConversation = { mode, level, topic, meetingScenarioId, sessionId, startedAt, turns, draft };
+      localStorage.setItem(PENDING_CONVERSATION_KEY, JSON.stringify(snapshot));
+    } catch { /* Quota/private browsing: app remains usable without auto-resume */ }
+  }, [active, busy, finished, mode, level, topic, meetingScenarioId, sessionId, startedAt, turns, draft]);
 
   const currentScenario = SCENARIOS[topic];
   const isMeeting = mode === 'meeting_script' || mode === 'meeting_ai';
@@ -234,8 +279,10 @@ export const ConversationView: FC<Props> = ({ onShowToast, onDataChanged }) => {
     streamingVoice.current?.cancel(); streamingVoice.current = null; stopSpeaking();
     recognizer.current?.stop(); setIsListening(false);
     setFinished(true);
-    try { await saveSession(turns); }
-    catch { onShowToast('会話履歴の保存に失敗しました', 'error'); }
+    try {
+      await saveSession(turns);
+      try { localStorage.removeItem(PENDING_CONVERSATION_KEY); } catch { /* ignore */ }
+    } catch { onShowToast('会話履歴の保存に失敗しました。保存前の会話はこの端末に保持しています', 'error'); }
     if (usesAiReplies) {
       try {
         const result = await requestConversationFeedback(isAdaptiveMeeting ? 'meeting' : topic, level, turns);
@@ -350,6 +397,10 @@ export const ConversationView: FC<Props> = ({ onShowToast, onDataChanged }) => {
       </div>}
 
       {active && <>
+        {!finished && !busy && <button type="button" onClick={start}
+          className="w-full rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700">
+          最初からやり直す（今の会話を破棄して新規開始）
+        </button>}
         <div className="flex items-center justify-between px-1 text-xs text-slate-600">
           <span>{currentLabel} · {level} · {isAdaptiveMeeting ? '回答に応じたAI会議' : mode === 'ai' ? 'AI応答' : isMeeting ? '固定の会議練習' : '固定シナリオ'}</span>
           <span>あなたの回答：{replies} / {maxTurns}</span>
